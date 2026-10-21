@@ -255,9 +255,13 @@ class MainWindow(QMainWindow):
         self._home_btn.setCursor(Qt.PointingHandCursor)
         self._home_btn.clicked.connect(self._show_home_menu)
         top_bar.addWidget(self._home_btn)
+        # 设备数徽标：单枚小胶囊（总量+在线是一体），锁高 22、垂直居中，
+        # 免得被"全部"标题撑成大方块
         self._count_label = QLabel()
         self._count_label.setObjectName("deviceCountLabel")
-        top_bar.addWidget(self._count_label)
+        self._count_label.setFixedHeight(22)
+        self._count_label.setTextFormat(Qt.TextFormat.RichText)
+        top_bar.addWidget(self._count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         top_bar.addStretch(1)
         # 更多菜单按钮：收起托盘管理、刷新等低频操作
         self._more_menu = QMenu()
@@ -345,11 +349,11 @@ class MainWindow(QMainWindow):
         卡片网格、托盘行、工作台等可重建结构由 _on_theme_changed
         走各自的重建入口；这里只管不重建的框架件。
         """
-        # 设备数做成小号胶囊：只比文字高一点，太大反而喧宾夺主
+        # 设备数小胶囊：紧贴文字、不高过标题
         self._count_label.setStyleSheet(
             f"color: {SiColors.TEXT_MUTED}; background: {SiColors.CARD};"
             f" border: 1px solid {SiColors.LINE}; border-radius: 11px;"
-            " padding: 1px 10px; font-size: 9pt;")
+            " padding: 0 10px; font-size: 9pt;")
         self._more_menu.setStyleSheet(
             f"QMenu {{ background: {SiColors.CARD}; border: 1px solid {SiColors.BTN_HOVER}; border-radius: 8px; padding: 4px; }}"
             f"QMenu::item {{ color: {SiColors.TEXT_PRIMARY}; padding: 6px 24px 6px 12px; border-radius: 4px; }}"
@@ -1239,11 +1243,13 @@ class MainWindow(QMainWindow):
         )
 
     def _update_count_label(self) -> None:
+        muted = SiColors.TEXT_MUTED
+        # 在线圆点固定为米家绿：它是"在线状态"的语义色，不随主题色变
+        online_dot = "#3dbba4"
         if self._current_room == _SCENE_TAB:
             count = len(self._scenes or [])
             self._count_label.setText(
-                f'<span style="color:{SiColors.TEXT_MUTED}">共 {count} 个场景</span>'
-            )
+                f'<span style="color:{muted}">共 {count} 个场景</span>')
             return
         subset = self._visible_devices() if self._current_home == _ALL_HOMES else [
             d for d in self._visible_devices() if d.home_name == self._current_home
@@ -1251,9 +1257,9 @@ class MainWindow(QMainWindow):
         total = len(subset)
         online = sum(1 for d in subset if d.online)
         self._count_label.setText(
-            f'<span style="color:{SiColors.TEXT_MUTED}">共 {total} 台设备</span>'
-            f'&nbsp;&nbsp;<span style="color:{SiColors.THEME}">●</span>'
-            f'&nbsp;<span style="color:{SiColors.TEXT_MUTED}">{online} 台在线</span>'
+            f'<span style="color:{muted}">共 {total} 台设备</span>'
+            f'&nbsp;&nbsp;<span style="color:{online_dot}">●</span>'
+            f'&nbsp;<span style="color:{muted}">{online} 台在线</span>'
         )
 
     def _on_poll_tick(self) -> None:
