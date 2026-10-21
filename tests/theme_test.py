@@ -213,6 +213,12 @@ app.processEvents()
 assert dlg._pending_accent == "#39a6d8", f"蓝色预设应为 #39A6D8: {dlg._pending_accent}"
 assert si_theme.SiColors.THEME == "#39a6d8", "主题色预览未生效"
 assert settings_store.get_theme_accent() == "", "预览主题色不应落盘"
+# 开关轨道色必须即时跟随：设置页不重建，siui 开关是构造期快照色
+from app.siui.components.button import SiSwitchRefactor
+_switches = dlg.findChildren(SiSwitchRefactor)
+assert _switches, "设置页未找到开关控件"
+assert _switches[0].style_data.background_color_starting.name().lower() == "#39a6d8", \
+    "换主题色后开关仍停留在旧颜色（要保存重开才变）"
 # 取消 → 还原为打开前（store 里是 dark，无变化）
 dlg._pending_mode = "light"
 dlg.done(QDialog.DialogCode.Rejected)

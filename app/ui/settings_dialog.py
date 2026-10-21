@@ -567,10 +567,11 @@ class SettingsDialog(OverlayDialog):
             self._refresh_accent_ui()
             return
         self._pending_accent = color
-        self._refresh_accent_ui()
+        # 先让宿主应用新主题色、再刷新本窗控件：否则开关/色块还是旧色
         win = self.parent()
         if hasattr(win, "apply_theme_mode"):
             win.apply_theme_mode(self._pending_mode, color)
+        self._refresh_accent_ui()
 
     def _refresh_accent_ui(self) -> None:
         current = (self._pending_accent or "").lower()
@@ -582,6 +583,12 @@ class SettingsDialog(OverlayDialog):
         self._custom_accent_chip.setIcon(qta.icon(
             "mdi.palette", color=custom_color or SiColors.TEXT_SECONDARY))
         self._accent_hex.setText(current.upper() if current else DEFAULT_ACCENT.upper())
+        # siui 开关轨道色是构造期快照：点选/取色预览时不重建对话框，
+        # 这里即时重刷，保证"换主题色开关马上变色"（不等保存重开）
+        from app.siui.components.button import SiSwitchRefactor
+        from app.ui.si_theme import apply_switch_theme
+        for switch in self.findChildren(SiSwitchRefactor):
+            apply_switch_theme(switch)
 
     def _style_accent_chips(self) -> None:
         """主题色按钮样式：主题切换后也走这里刷新（选中态用当前主题色描边）。"""

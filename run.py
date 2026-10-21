@@ -62,6 +62,14 @@ def main() -> int:
     _apply_ui_scale_env()
     app = QApplication(sys.argv)
 
+    # Qt 自带控件的文案（取色板、消息框按钮等）按系统语言加载翻译：
+    # 不加载时 QColorDialog 会整屏英文（"Basic colors"/"OK"/"Cancel"）
+    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+    _qt_translator = QTranslator(app)  # 挂到 app 上保活
+    if _qt_translator.load(QLocale(), "qtbase", "_",
+                           QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(_qt_translator)
+
     # 主题必须在创建任何控件之前生效：调色板决定全部内联样式的取值
     from app.core.settings_store import get_theme_mode
     from app.ui.theme_service import apply_theme

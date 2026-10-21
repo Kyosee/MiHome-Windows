@@ -150,7 +150,7 @@ class TrayQuickWindow(QDialog):
         self._scroll.setFrameShape(QFrame.NoFrame)
         # 固定高度：可见 4 排卡片（56×4 + 间距6×3），单双列共用同一行高；
         # 窗口按上下栏显隐外扩
-        self._scroll.setFixedHeight(4 * 56 + 3 * 6)
+        self._scroll.setFixedHeight(4 * 50 + 3 * 6)
         self._scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
             "QScrollBar:vertical { background: transparent; width: 6px; margin: 0 2px 0 0; }"
@@ -363,8 +363,8 @@ class TrayQuickWindow(QDialog):
             ah = self._audio_bar.sizeHint().height()
             audio_h = (ah if ah > 0 else 140) + 8  # 8 = 外层 spacing
         voice_h = 36 + 10 if not self._voice_frame.isHidden() else 0  # 36 + 间距10
-        # 根面板：标题 26 + 滚动区 242 + 上间距10 + 下间距10 + 内容边距 24
-        root_h = 26 + 242 + 24 + 20
+        # 根面板：标题 26 + 滚动区 218(50×4+6×3) + 上间距10 + 下间距10 + 内容边距 24
+        root_h = 26 + 218 + 24 + 20
         h = audio_h + root_h + voice_h
         from PySide6.QtGui import QGuiApplication
         screen = QGuiApplication.primaryScreen()
@@ -622,14 +622,14 @@ class TrayQuickWindow(QDialog):
         row = QFrame()
         row.setObjectName("trayRow")
         row.setAttribute(Qt.WA_StyledBackground, True)
-        row.setFixedHeight(56)
+        row.setFixedHeight(50)
         from PySide6.QtWidgets import QSizePolicy
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row.setStyleSheet(
             f"QFrame#trayRow {{ background: {SiColors.CARD}; border: 1px solid {SiColors.LINE}; border-radius: 10px; }}"
             f"QFrame#trayRow:hover {{ background: {SiColors.CARD_HOVER}; border-color: {SiColors.CARD_BORDER_HOVER}; }}")
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 6, 12, 6)
         lay.setSpacing(10)
 
         known = self._known_power.get(dev.did)
@@ -710,14 +710,14 @@ class TrayQuickWindow(QDialog):
         row = QFrame()
         row.setObjectName("trayRow")
         row.setAttribute(Qt.WA_StyledBackground, True)
-        row.setFixedHeight(56)
+        row.setFixedHeight(50)
         from PySide6.QtWidgets import QSizePolicy
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row.setStyleSheet(
             f"QFrame#trayRow {{ background: {SiColors.CARD}; border: 1px solid {SiColors.LINE}; border-radius: 10px; }}"
             f"QFrame#trayRow:hover {{ background: {SiColors.CARD_HOVER}; border-color: {SiColors.CARD_BORDER_HOVER}; }}")
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 6, 12, 6)
         lay.setSpacing(10)
 
         avail = self._card_text_width(True)

@@ -345,8 +345,11 @@ class MainWindow(QMainWindow):
         卡片网格、托盘行、工作台等可重建结构由 _on_theme_changed
         走各自的重建入口；这里只管不重建的框架件。
         """
+        # 设备数做成小号胶囊：只比文字高一点，太大反而喧宾夺主
         self._count_label.setStyleSheet(
-            f"color: {SiColors.TEXT_MUTED}; background: transparent;")
+            f"color: {SiColors.TEXT_MUTED}; background: {SiColors.CARD};"
+            f" border: 1px solid {SiColors.LINE}; border-radius: 11px;"
+            " padding: 1px 10px; font-size: 9pt;")
         self._more_menu.setStyleSheet(
             f"QMenu {{ background: {SiColors.CARD}; border: 1px solid {SiColors.BTN_HOVER}; border-radius: 8px; padding: 4px; }}"
             f"QMenu::item {{ color: {SiColors.TEXT_PRIMARY}; padding: 6px 24px 6px 12px; border-radius: 4px; }}"

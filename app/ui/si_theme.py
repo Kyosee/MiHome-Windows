@@ -266,9 +266,9 @@ PALETTES: dict[str, dict[str, str]] = {
         TEXT_SUBTLE="#8a8b93",
         TEXT_DISABLED="#b4b6bc",
         TEXT_FAINT="#c6c8ce",
-        OFFLINE_CARD="#f0f0f2",
-        OFFLINE_TEXT="#a0a2a8",
-        OFFLINE_SUB="#b6b8bf",
+        OFFLINE_CARD="#e4e6eb",
+        OFFLINE_TEXT="#8f929b",
+        OFFLINE_SUB="#a8abb3",
         ICON_DIM="#85878e",
         ICON_MUTED="#9a9aa0",
         HOME_HOVER="#55565c",
@@ -681,6 +681,18 @@ def sync_siui_colors() -> None:
 # siui 控件工厂（仅保留项目实际用到的）
 # ----------------------------------------------------------------------------
 
+def apply_switch_theme(switch) -> None:
+    """把一枚已存在的 siui 开关刷成当前主题色。
+
+    开关的轨道色是构造期快照：设置页预览主题色时不会重建对话框，
+    不手动刷一次就会出现"开关还是旧颜色，点保存重开才变"。
+    """
+    switch.style_data.background_color_starting = QColor(SiColors.THEME)
+    switch.style_data.background_color_ending = QColor(SiColors.THEME)
+    switch.style_data.thumb_color_checked = QColor(SWITCH_THUMB_LIGHT)
+    switch.update()
+
+
 def themed_switch() -> SiSwitchRefactor:
     """bool 属性用的开关，开启态轨道为主题色。
 
@@ -689,10 +701,7 @@ def themed_switch() -> SiSwitchRefactor:
     （用户两轮反馈后统一为白）。
     """
     switch = SiSwitchRefactor()
-    switch.style_data.background_color_starting = QColor(SiColors.THEME)
-    switch.style_data.background_color_ending = QColor(SiColors.THEME)
-    switch.style_data.thumb_color_checked = QColor(SWITCH_THUMB_LIGHT)
-    switch.update()
+    apply_switch_theme(switch)
     return switch
 
 
