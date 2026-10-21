@@ -29,10 +29,19 @@ import qtawesome as qta
 from app.core import schedule_store
 from app.core.models import DeviceInfo
 from app.ui.overlay_dialog import OverlayDialog
-from app.ui.si_theme import SiColors, themed_combo, themed_switch
+from app.ui.si_theme import (
+    SiColors,
+    primary_button_qss,
+    themed_combo,
+    themed_switch,
+)
 
 _ACTION_LABEL = {"on": "打开", "off": "关闭"}
-_ACTION_COLOR = {"on": SiColors.THEME, "off": SiColors.STATE_OFF}
+
+
+def _action_color(action: str) -> str:
+    """动作色改成调用期求值：模块导入时缓存会把主题色钉死在启动那一刻。"""
+    return SiColors.THEME if action == "on" else SiColors.STATE_OFF
 
 
 class ScheduleDialog(OverlayDialog):
@@ -75,6 +84,9 @@ class ScheduleDialog(OverlayDialog):
         hint = QLabel("每台设备可配多条规则，到点自动执行一次。"
                       "需应用保持运行（可最小化到托盘），关掉程序不会触发。")
         hint.setWordWrap(True)
+        # 垂直方向不参与拉伸：否则窗口高时这行说明会被拉开，把"新增规则"
+        # 和规则列表推散到屏幕各处（用户实测反馈位置乱）
+        hint.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         hint.setStyleSheet(
             f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
         lay.addWidget(hint)
@@ -104,6 +116,10 @@ class ScheduleDialog(OverlayDialog):
 
         self._empty = QLabel("还没有定时任务\n上面选好设备与时间，点「添加」")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 空态占满列表剩下的空间并居中显示：内容整体从上往下排，
+        # 多余空间只落在底部这块提示上，不会把上方控件拉开
+        self._empty.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                  QSizePolicy.Policy.Expanding)
         self._empty.setStyleSheet(
             f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
         self._empty.hide()
@@ -117,6 +133,8 @@ class ScheduleDialog(OverlayDialog):
         box = QFrame()
         box.setObjectName("schedSection")
         box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 固定高度语义：这个区块只放输入控件，不该跟着窗口变高
+        box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         box.setStyleSheet(
             f"QFrame#schedSection {{ background: {SiColors.CARD};"
             f" border: 1px solid {SiColors.LINE}; border-radius: 10px; }}")
@@ -196,10 +214,7 @@ class ScheduleDialog(OverlayDialog):
         row.addStretch(1)
         add_btn = QPushButton("添加")
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.setStyleSheet(
-            f"QPushButton {{ background: {SiColors.THEME}; border: none;"
-            " border-radius: 8px; padding: 5px 16px; color: #0b0b0e; font-weight: 600; }"
-            f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}")
+        add_btn.setStyleSheet(primary_button_qss("5px 16px"))
         add_btn.clicked.connect(self._on_add)
         row.addWidget(add_btn)
         box_lay.addLayout(row)
@@ -351,7 +366,7 @@ class ScheduleDialog(OverlayDialog):
         action_label.setFixedWidth(34)
         action_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         action_label.setStyleSheet(
-            f"color: {_ACTION_COLOR[rule['action']]}; background: transparent;"
+            f"color: {_action_color(rule['action'])}; background: transparent;"
             " font-size: 8pt; font-weight: 600;")
         lay.addWidget(action_label)
 

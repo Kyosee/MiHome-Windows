@@ -8,9 +8,10 @@
 替换带来的生硬变化。
 """
 
-from PySide6.QtCore import QEvent, QPropertyAnimation, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEvent, QPropertyAnimation, QSize, Qt
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
+    QColorDialog,
     QDialog,
     QFrame,
     QGraphicsOpacityEffect,
@@ -22,13 +23,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import qtawesome as qta
+
 from app.core import board_store
 from app.core import settings_store
 from app.core.models import is_speaker
 from app.ui.overlay_dialog import OverlayDialog
 from app.ui.si_theme import (
+    DEFAULT_ACCENT,
     SiColors,
     apply_combo_qss,
+    primary_button_qss,
     themed_combo,
     themed_switch,
     themed_tab_button,
@@ -37,6 +42,15 @@ from app.ui.si_theme import (
 # 下拉文案 -> 设置值
 _THEME_MODE_LABELS = {"system": "跟随系统", "light": "浅色模式", "dark": "深色模式"}
 _THEME_LABEL_TO_MODE = {v: k for k, v in _THEME_MODE_LABELS.items()}
+
+# 主题色预设：与主界面按钮、开关、选中态同源，点一下即刻预览。
+# 色值一律小写：设置里存的就是小写，选中态比对靠字符串相等
+_ACCENT_PRESETS: tuple[tuple[str, str], ...] = (
+    ("绿色", "#3dbba4"),
+    ("粉色", "#e27aa8"),
+    ("黄色", "#f0b429"),
+    ("蓝色", "#39a6d8"),
+)
 
 _TAB_APPEARANCE, _TAB_FEATURES = 0, 1
 _TAB_TITLES = ("主题界面", "应用功能")
@@ -144,7 +158,7 @@ class SettingsDialog(OverlayDialog):
         # ---- 底部按钮 ----
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        self._done_btn = QPushButton("完成")
+        self._done_btn = QPushButton("保存")
         self._done_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._done_btn.clicked.connect(self._save_and_accept)
         btn_row.addWidget(self._done_btn)
@@ -217,6 +231,43 @@ class SettingsDialog(OverlayDialog):
         self._theme_combo.currentTextChanged.connect(self._on_theme_selected)
         theme_row.addWidget(self._theme_combo)
 
+        # ── 主题色（预设色块 + 自定义取色板） ──
+        self._accent_item, self._accent_label, self._accent_desc, accent_row = \
+            self._make_item(
+                "主题色",
+                "为按钮、开关、选中项与浮窗统一配色，深色/浅色模式共用；"
+                "点「自定义」打开取色板任选颜色")
+        self._original_accent = settings_store.get_theme_accent() or DEFAULT_ACCENT
+        self._pending_accent = self._original_accent
+        accent_box = QHBoxLayout()
+        accent_box.setContentsMargins(0, 0, 0, 0)
+        accent_box.setSpacing(6)
+        self._accent_chips: dict[str, QPushButton] = {}
+        for name, color in _ACCENT_PRESETS:
+            chip = QPushButton(name)
+            chip.setCheckable(True)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setFixedHeight(28)
+            chip.setIcon(qta.icon("mdi.circle", color=color))
+            chip.setIconSize(QSize(12, 12))
+            chip.clicked.connect(lambda _c=False, v=color: self._on_accent_picked(v))
+            self._accent_chips[color] = chip
+            accent_box.addWidget(chip)
+        self._custom_accent_chip = QPushButton("自定义")
+        self._custom_accent_chip.setCheckable(True)
+        self._custom_accent_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._custom_accent_chip.setFixedHeight(28)
+        self._custom_accent_chip.setIconSize(QSize(12, 12))
+        self._custom_accent_chip.setToolTip("打开取色板，选任意颜色")
+        self._custom_accent_chip.clicked.connect(self._choose_custom_accent)
+        accent_box.addWidget(self._custom_accent_chip)
+        self._accent_hex = QLabel()
+        self._accent_hex.setStyleSheet(
+            f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
+        accent_box.addWidget(self._accent_hex)
+        accent_row.addLayout(accent_box)
+        self._refresh_accent_ui()
+
         # ── 界面缩放比例（高 DPI 屏幕微调；更改后重启生效） ──
         self._scale_item, self._scale_label, self._scale_desc, scale_row = self._make_item(
             "界面缩放比例",
@@ -262,7 +313,8 @@ class SettingsDialog(OverlayDialog):
         scene_row.addWidget(self._scene_toggle)
 
         return self._build_scroll([
-            self._theme_item, self._scale_item, self._fab_item, self._scene_item,
+            self._theme_item, self._accent_item, self._scale_item,
+            self._fab_item, self._scene_item,
         ])
 
     def _build_features_page(self) -> QScrollArea:
@@ -332,14 +384,14 @@ class SettingsDialog(OverlayDialog):
         _sync_switch(self._start_min_toggle)
         start_min_row.addWidget(self._start_min_toggle)
 
-        # ── 桌面挂件：启动时自动显示 ──
+        # ── 桌面挂件：总开关（开启 = 常驻桌面 + 随应用启动显示） ──
         self._board_item, self._board_label, self._board_desc, board_row = self._make_item(
-            "启动时显示桌面挂件",
-            "开启后每次启动都显示挂件；关闭时跟随上次退出时的状态"
-            "（上次开着就继续开着，上次关了就不弹）。"
-            "挂件的设备、列数与透明度在「管理桌面挂件」中调整")
+            "桌面挂件",
+            "开启后桌面常驻一块设备控制面板，并随应用启动自动显示；"
+            "关闭后挂件及其管理入口一并隐藏。"
+            "挂件的内容、列数与透明度在「管理桌面挂件」中调整")
         self._board_toggle = themed_switch()
-        self._board_toggle.setChecked(board_store.get_autostart())
+        self._board_toggle.setChecked(board_store.get_enabled())
         _sync_switch(self._board_toggle)
         board_row.addWidget(self._board_toggle)
 
@@ -421,7 +473,7 @@ class SettingsDialog(OverlayDialog):
         for item in (self._tray_item, self._start_min_item, self._fab_item,
                      self._scene_item, self._theme_item, self._autostart_item,
                      self._speaker_item, self._hide_item, self._scale_item,
-                     self._update_item, self._board_item):
+                     self._update_item, self._board_item, self._accent_item):
             item.setStyleSheet(panel_card)
             # 高度按内容自适应（不固定）：长描述换行后行自然变高，
             # 不会被固定 64px 裁掉；短描述保持紧凑。QScrollArea 负责
@@ -432,19 +484,17 @@ class SettingsDialog(OverlayDialog):
         for label in (self._tray_label, self._start_min_label, self._fab_label,
                       self._scene_label, self._theme_label, self._autostart_label,
                       self._speaker_label, self._hide_label, self._scale_label,
-                      self._update_label, self._board_label):
+                      self._update_label, self._board_label, self._accent_label):
             label.setStyleSheet(
                 f"color: {SiColors.TEXT_PRIMARY}; background: transparent; font-size: 10pt;")
         for desc in (self._tray_desc, self._start_min_desc, self._fab_desc,
                      self._scene_desc, self._theme_desc, self._autostart_desc,
                      self._speaker_desc, self._hide_desc, self._scale_desc,
-                     self._update_desc, self._board_desc):
+                     self._update_desc, self._board_desc, self._accent_desc):
             desc.setStyleSheet(
                 f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 7pt;")
-        self._done_btn.setStyleSheet(
-            f"QPushButton {{ background: {SiColors.THEME}; border: none; border-radius: 8px; "
-            f"padding: 7px 18px; color: {SiColors.ON_THEME_TEXT}; font-weight: 600; }}"
-            f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}")
+        # 主按钮文字固定白色（不随深/浅主题翻转）
+        self._done_btn.setStyleSheet(primary_button_qss("7px 18px"))
         apply_combo_qss(self._theme_combo)
         self._theme_combo.set_arrow_color(SiColors.TEXT_SECONDARY)
         # 界面缩放下拉同样随主题刷新（遗漏曾致切主题后仍保持旧深色样式）
@@ -461,6 +511,9 @@ class SettingsDialog(OverlayDialog):
             btn.style_data.idle_color = QColor("#00" + SiColors.THEME[1:])
             btn.style_data.click_color = QColor("#40" + SiColors.THEME[1:])
             btn.reloadStyleData()
+        # 主题色按钮与色号提示（内联样式为构造期求值，切主题要重刷）
+        self._refresh_accent_ui()
+        self._style_accent_chips()
 
     def _apply_autostart_state(self, supported: bool) -> None:
         """开发模式下灰置自启动行（开关透明度 + 文字变灰）。"""
@@ -495,7 +548,54 @@ class SettingsDialog(OverlayDialog):
         self._pending_mode = mode
         win = self.parent()
         if hasattr(win, "apply_theme_mode"):
-            win.apply_theme_mode(mode)
+            # 带上待选主题色：否则预览时会回落到"已保存"的颜色
+            win.apply_theme_mode(mode, self._pending_accent)
+
+    def _choose_custom_accent(self) -> None:
+        """打开取色板（与挂件"自定义背景色"同一套交互）。"""
+        picked = QColorDialog.getColor(
+            QColor(self._pending_accent or DEFAULT_ACCENT), self, "选择主题色")
+        if picked.isValid():
+            self._on_accent_picked(picked.name())
+
+    def _on_accent_picked(self, color: str) -> None:
+        """点了预设色块或取色板：立即预览（不落盘，保存时才写设置）。"""
+        color = (color or "").lower()
+        if not color:
+            return
+        if color == self._pending_accent:
+            self._refresh_accent_ui()
+            return
+        self._pending_accent = color
+        self._refresh_accent_ui()
+        win = self.parent()
+        if hasattr(win, "apply_theme_mode"):
+            win.apply_theme_mode(self._pending_mode, color)
+
+    def _refresh_accent_ui(self) -> None:
+        current = (self._pending_accent or "").lower()
+        preset_colors = {c for _, c in _ACCENT_PRESETS}
+        for color, chip in self._accent_chips.items():
+            chip.setChecked(color == current)
+        custom_color = current if current not in preset_colors else None
+        self._custom_accent_chip.setChecked(custom_color is not None)
+        self._custom_accent_chip.setIcon(qta.icon(
+            "mdi.palette", color=custom_color or SiColors.TEXT_SECONDARY))
+        self._accent_hex.setText(current.upper() if current else DEFAULT_ACCENT.upper())
+
+    def _style_accent_chips(self) -> None:
+        """主题色按钮样式：主题切换后也走这里刷新（选中态用当前主题色描边）。"""
+        qss = (
+            f"QPushButton {{ background: {SiColors.CTRL_BG};"
+            f" border: 1px solid {SiColors.CTRL_BORDER}; border-radius: 14px;"
+            f" padding: 2px 10px; color: {SiColors.TEXT_PRIMARY}; font-size: 9pt; }}"
+            f"QPushButton:hover {{ border-color: {SiColors.THEME}; }}"
+            f"QPushButton:checked {{ border: 1px solid {SiColors.THEME};"
+            f" background: {SiColors.CTRL_BG_HOVER}; font-weight: 600; }}")
+        for chip in list(self._accent_chips.values()) + [self._custom_accent_chip]:
+            chip.setStyleSheet(qss)
+        self._accent_hex.setStyleSheet(
+            f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
 
     def _on_scale_selected(self, index: int) -> None:
         """用户从下拉点选预设档位（activated 信号）：更新值并回显。"""
@@ -562,10 +662,13 @@ class SettingsDialog(OverlayDialog):
         if self._devices:
             settings_store.set_voice_fab_enabled(self._voice_fab_toggle.isChecked())
         settings_store.set_hide_no_func_devices(self._hide_toggle.isChecked())
-        board_store.set_autostart(self._board_toggle.isChecked())
+        board_store.set_enabled(self._board_toggle.isChecked())
         settings_store.set_show_scene_tab(self._scene_toggle.isChecked())
         settings_store.set_check_update_enabled(self._update_toggle.isChecked())
         settings_store.set_theme_mode(self._pending_mode)
+        # 主题色：与默认绿相同时存空串，保留"跟随默认"的语义
+        accent = (self._pending_accent or "").lower()
+        settings_store.set_theme_accent("" if accent == DEFAULT_ACCENT.lower() else accent)
         # 界面缩放：记录是否变化，供保存后提示重启
         old_scale = self._original_ui_scale
         self._scale_changed = abs(self._pending_ui_scale - old_scale) >= 1e-6
@@ -579,12 +682,16 @@ class SettingsDialog(OverlayDialog):
         self.accept()
 
     def done(self, result) -> None:  # noqa: N802
-        # 取消时还原为打开前的主题（选择时已即时预览）
-        if result == QDialog.DialogCode.Rejected and self._pending_mode != self._original_mode:
-            self._pending_mode = self._original_mode
-            win = self.parent()
-            if hasattr(win, "apply_theme_mode"):
-                win.apply_theme_mode(self._original_mode)
+        # 取消时还原为打开前的主题与主题色（选择时已即时预览）
+        if result == QDialog.DialogCode.Rejected:
+            changed = (self._pending_mode != self._original_mode
+                       or self._pending_accent.lower() != self._original_accent.lower())
+            if changed:
+                self._pending_mode = self._original_mode
+                self._pending_accent = self._original_accent
+                win = self.parent()
+                if hasattr(win, "apply_theme_mode"):
+                    win.apply_theme_mode(self._original_mode, self._original_accent)
         super().done(result)
 
     def _apply_speaker_state(self, has_speaker: bool) -> None:

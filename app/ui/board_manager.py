@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # MiHome-Windows: 米家设备的 Windows 桌面控制端
 # Copyright (C) 2026 MiHome-Windows contributors
-"""桌面挂件的管理对话框：勾选设备 + 拖拽排序 + 列数 / 透明度 / 背景色 / 置顶。
+"""桌面挂件的管理对话框：勾选设备/场景 + 列数 / 透明度 / 背景色 / 置顶。
 
-设备勾选与拖拽排序整体复用托盘管理对话框（TrayManagerDialog）的
-_DraggableRow 实现——两处管理交互完全一致，不重复造轮子；本文件
-只额外承担 Board 独有的四项：每行列数、透明度、背景色、窗口置顶。
+设备与场景**分页展示**（与托盘管理一致）：设备页只列设备，场景页只列场景，
+不再混在一张长列表里靠标签区分。
+
+本窗只决定"挂件上放哪些"，**不提供排序**：顺序直接在挂件面板上按住卡片
+拖动调整。两个地方都能排序必然互相覆盖，留一个入口最不容易出错。
 
 透明度、列数、背景色、置顶都是**拖动/点击即生效**（所见即所得），点「取消」
-也会保留这些调整；点「保存」只决定设备清单与顺序是否写入。
+也会保留这些调整；点「保存」只决定设备/场景清单是否写入。
 """
 
 from PySide6.QtCore import Qt, Signal
@@ -32,10 +34,14 @@ from PySide6.QtWidgets import (
 from app.core import board_store
 from app.core.models import DeviceInfo
 from app.ui.overlay_dialog import OverlayDialog
-from app.ui.si_theme import SiColors
-from app.ui.tray.draggable_row import _DraggableRow
+from app.ui.si_theme import (
+    SiColors,
+    check_toggle_qss,
+    primary_button_qss,
+    secondary_button_qss,
+)
 
-_COL_MIN, _COL_MAX = 1, 6
+_COL_MIN, _COL_MAX = 1, 9
 _OPACITY_MIN, _OPACITY_MAX = 30, 100  # 滑块刻度用整数百分比
 
 # 预设底色：黑 / 深灰 / 石墨 / 白 / 米白 / 墨蓝。
@@ -66,7 +72,6 @@ class BoardManagerDialog(OverlayDialog):
         # 与托盘管理同款观感：铺满窗口的可拖拽面板，无遮罩
         super().__init__(parent, overlay=False)
         self.setWindowTitle("管理桌面挂件")
-        self._drag_did: str | None = None
         # 当前选中的底色：None=跟随主题。色块与取色器共用这一个状态
         self._bg: str | None = board_store.get_bg()
         # 可添加的场景：调用方传入（主窗口缓存/在线拉的）；None 表示暂无
@@ -76,9 +81,14 @@ class BoardManagerDialog(OverlayDialog):
         # 先建空的勾选/行表：列数分区在设备列表之前构建，其提示文案
         # 需要按已勾选数量计算，构造期必须能安全查空表
         self._checks: dict[str, QPushButton] = {}
-        self._rows: dict[str, _DraggableRow] = {}
+        self._rows: dict[str, QWidget] = {}
+        # 两页各自的展示顺序（设备 did / scene:<sid>），保存时按它输出
+        self._device_keys: list[str] = []
+        self._scene_keys: list[str] = []
         self._scene_tags: list[QLabel] = []
-        self.setAcceptDrops(True)
+        # 打开时的混排顺序：保存时保留用户已在挂件上拖好的相对顺序，
+        # 新勾选的追加到末尾（本窗不再排序，避免覆盖面板上的拖拽结果）
+        self._initial_order: list[dict] = board_store.load_order()
 
         lay = QVBoxLayout(self._panel)
         lay.setContentsMargins(16, 12, 16, 16)
@@ -105,47 +115,20 @@ class BoardManagerDialog(OverlayDialog):
         header.addWidget(self._make_close_button())
         lay.addWidget(title_bar)
 
-        # ---- 两个页签：设备（主任务）/ 外观（设置）----
-        # 之前四个设置分区把 660px 高的面板吃掉一大半，设备列表只剩两行可看。
-        # 拆页后设备页把整块空间让给列表（十来行），外观页也不用挤在小空间里。
+        # ---- 三个页签：设备 / 场景 / 外观 ----
+        # 设备与场景分开列（与托盘管理一致）：混在一张长列表里，用户很难
+        # 一眼看出"我到底放了哪些"。外观页只放即时生效的样式项。
         lay.addWidget(self._make_tab_bar())
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._make_device_page())
+        self._stack.addWidget(self._make_scene_page())
         self._stack.addWidget(self._make_style_page())
         lay.addWidget(self._stack, stretch=1)
         self._set_page(0)
 
-        selected = board_store.load_devices()
-        selected_scenes = board_store.load_scenes()
-        order = board_store.load_order()
-        dev_map = {d.did: d for d in devices}
-        scene_map = {s["scene_id"]: s for s in selected_scenes}
-        placed: set[tuple[str, str]] = set()
-        # ① 已选项按 board.json 的混排顺序（场景/设备混在一起）
-        for entry in order:
-            t, i = entry.get("type"), entry.get("id")
-            if t == "device" and i in dev_map and i in selected:
-                self._add_row(dev_map[i], True)
-                placed.add(("device", i))
-            elif t == "scene" and i in scene_map:
-                self._add_scene_row(scene_map[i], True)
-                placed.add(("scene", i))
-        # ② 顺序表遗漏的已选设备（旧数据兜底），离线也保留：
-        #    否则保存时会被静默丢掉
-        for did in selected:
-            if ("device", did) not in placed and did in dev_map:
-                self._add_row(dev_map[did], True)
-                placed.add(("device", did))
-        # ③ 未选的在线设备（离线的不进候选，纯噪音）
-        for dev in sorted([d for d in devices
-                           if d.did not in selected and d.online], key=lambda d: d.name):
-            self._add_row(dev, False)
-        # ④ 未选的场景（全部列出：场景没有在线概念）
-        for scene in sorted(self._scenes_available, key=lambda s: s.get("name", "")):
-            if ("scene", scene["scene_id"]) not in placed:
-                self._add_scene_row(scene, False)
-        self._list_lay.addStretch(1)
+        self._fill_device_rows(devices)
+        self._fill_scene_rows()
         # 行已建好，重算列数提示（构造期构建列数分区时列表还是空的）
         self._refresh_columns_ui()
 
@@ -154,23 +137,34 @@ class BoardManagerDialog(OverlayDialog):
     # ---------- 页签与两个页面 ----------
 
     def _make_tab_bar(self) -> QWidget:
-        """设备 / 外观 两个分段按钮，切换 QStackedWidget。"""
+        """设备 / 场景 在左，「外观」靠右，按钮尺寸与托盘管理一致。"""
         holder = QWidget()
         row = QHBoxLayout(holder)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
+        row.setSpacing(8)
         self._tab_buttons: list[QPushButton] = []
-        for idx, text in enumerate(("设备", "外观")):
-            btn = QPushButton(text)
-            btn.setCheckable(True)
-            btn.setFixedHeight(30)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            btn.clicked.connect(lambda _c=False, i=idx: self._set_page(i))
+        for text in ("设备", "场景"):
+            btn = self._make_tab_button(text)
             self._tab_buttons.append(btn)
             row.addWidget(btn)
-        # 页面在 _stack 建好后才切换（_set_page 要用到 _stack 与 _subtitle）
+        row.addStretch(1)
+        # 外观是低频设置项：跟设备/场景这种"列表页"分开，靠在最右侧
+        style_btn = self._make_tab_button("外观")
+        self._tab_buttons.append(style_btn)
+        row.addWidget(style_btn)
+        for idx, btn in enumerate(self._tab_buttons):
+            btn.clicked.connect(lambda _c=False, i=idx: self._set_page(i))
+        # 页面在 _stack 建好后才切换（_set_page 要用到 _stack）
         return holder
+
+    def _make_tab_button(self, text: str) -> QPushButton:
+        """分段按钮：与 TrayManagerDialog 的页签同一套尺寸与配色。"""
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFixedHeight(30)
+        btn.setStyleSheet(self._tab_qss(False))
+        return btn
 
     def _set_page(self, index: int) -> None:
         index = 0 if index < 0 else min(index, len(self._tab_buttons) - 1)
@@ -178,19 +172,20 @@ class BoardManagerDialog(OverlayDialog):
             btn.setChecked(i == index)
             btn.setStyleSheet(self._tab_qss(i == index))
         self._stack.setCurrentIndex(index)
-        # subtitle 只在设备页有意义；外观页不留空行
-        self._subtitle.setVisible(index == 0)
 
     def _tab_qss(self, active: bool) -> str:
+        """与托盘管理的页签同一套观感（紧凑、不拉伸）。"""
         if active:
             return (
-                f"QPushButton {{ background: {SiColors.THEME}; border: none;"
-                " border-radius: 8px; color: #0b0b0e; font-weight: 600;"
-                " font-size: 9pt; }")
+                f"QPushButton {{ background: {SiColors.THEME}; border: 1px solid {SiColors.THEME};"
+                f" border-radius: 8px; padding: 0 18px; color: {SiColors.ON_THEME_TEXT};"
+                " font-weight: 600; }")
         return (
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
-            f" border-radius: 8px; color: {SiColors.TEXT_PRIMARY}; font-size: 9pt; }}"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}")
+            f"QPushButton {{ background: {SiColors.CTRL_BG};"
+            f" border: 1px solid {SiColors.CTRL_BORDER};"
+            f" border-radius: 8px; padding: 0 18px; color: {SiColors.TEXT_PRIMARY};"
+            " font-weight: 600; }"
+            f"QPushButton:hover {{ background: {SiColors.CTRL_BG_HOVER}; }}")
 
     def _make_device_page(self) -> QWidget:
         page = QWidget()
@@ -198,35 +193,75 @@ class BoardManagerDialog(OverlayDialog):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(8)
 
-        self._subtitle = QLabel("勾选设备/场景；按住 ⠿ 拖动排序")
+        self._subtitle = QLabel(
+            "勾选设备加入挂件；顺序可直接在挂件面板上按住卡片拖动调整")
+        self._subtitle.setWordWrap(True)
         self._subtitle.setStyleSheet(
             f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
         box.addWidget(self._subtitle)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索设备 / 场景 / 房间…")
+        self._search.setPlaceholderText("搜索设备 / 房间…")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(28)
         self._search.setStyleSheet(self._search_qss())
-        self._search.textChanged.connect(self._apply_filter)
+        self._search.textChanged.connect(self._apply_device_filter)
         box.addWidget(self._search)
 
+        scroll, host = self._make_list_scroll()
+        self._host = host
+        self._list_lay = QVBoxLayout(host)
+        # 右侧留 10px：卡片直接贴到滚动条上会显得挤（用户实测反馈），
+        # 与托盘管理的间距保持一致
+        self._list_lay.setContentsMargins(0, 0, 10, 0)
+        self._list_lay.setSpacing(8)
+        box.addWidget(scroll, stretch=1)
+        self._scroll = scroll
+        return page
+
+    def _make_scene_page(self) -> QWidget:
+        """场景页：与设备页同构，只列场景。"""
+        page = QWidget()
+        box = QVBoxLayout(page)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(8)
+
+        self._scene_subtitle = QLabel(
+            "勾选场景加入挂件；顺序与设备一致，直接在工作台面板上拖动卡片调整")
+        self._scene_subtitle.setWordWrap(True)
+        self._scene_subtitle.setStyleSheet(
+            f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
+        box.addWidget(self._scene_subtitle)
+
+        self._scene_search = QLineEdit()
+        self._scene_search.setPlaceholderText("搜索场景 / 家庭…")
+        self._scene_search.setClearButtonEnabled(True)
+        self._scene_search.setFixedHeight(28)
+        self._scene_search.setStyleSheet(self._search_qss())
+        self._scene_search.textChanged.connect(self._apply_scene_filter)
+        box.addWidget(self._scene_search)
+
+        scroll, host = self._make_list_scroll()
+        self._scene_host = host
+        self._scene_list_lay = QVBoxLayout(host)
+        self._scene_list_lay.setContentsMargins(0, 0, 10, 0)
+        self._scene_list_lay.setSpacing(8)
+        box.addWidget(scroll, stretch=1)
+        self._scene_scroll = scroll
+        return page
+
+    @staticmethod
+    def _make_list_scroll() -> tuple[QScrollArea, QWidget]:
+        """列表滚动区：无边框、无横向滚动条（行按视口宽度铺满）。"""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         host = QWidget()
         host.setStyleSheet("background: transparent;")
-        self._host = host
-        self._list_lay = QVBoxLayout(host)
-        self._list_lay.setContentsMargins(0, 0, 0, 0)
-        self._list_lay.setSpacing(8)
         scroll.setWidget(host)
-        box.addWidget(scroll, stretch=1)
-        host.setAcceptDrops(True)
-        scroll.viewport().setAcceptDrops(True)
-        self._scroll = scroll
-        return page
+        return scroll, host
 
     def _make_style_page(self) -> QWidget:
         page = QWidget()
@@ -258,64 +293,112 @@ class BoardManagerDialog(OverlayDialog):
 
     # ---------- 列表构建 ----------
 
-    def _add_row(self, dev: DeviceInfo, checked: bool) -> None:
-        row = _DraggableRow(dev.did)
+    def _fill_device_rows(self, devices: list[DeviceInfo]) -> None:
+        """填充设备页：已选在前（按挂件当前顺序），其余按"在线优先+名称"排。"""
+        selected = board_store.load_devices()
+        dev_map = {d.did: d for d in devices}
+        placed: list[str] = []
+        for entry in self._initial_order:
+            if entry.get("type") != "device":
+                continue
+            did = entry.get("id")
+            if did in selected and did in dev_map and did not in placed:
+                placed.append(did)
+        # 顺序表遗漏的已选设备（旧数据兜底），离线也保留：
+        # 否则保存时会被静默丢掉
+        for did in selected:
+            if did in dev_map and did not in placed:
+                placed.append(did)
+        for did in placed:
+            self._add_row(dev_map[did], True)
+        # 未选设备全部列出（含离线，名字标灰）：离线设备也可能要放进挂件
+        # 长期摆放，藏起来只会让用户以为"设备丢了"。在线优先、同状态按名排
+        for dev in sorted((d for d in devices if d.did not in selected),
+                          key=lambda d: (0 if d.online else 1, d.name)):
+            self._add_row(dev, False)
+        self._list_lay.addStretch(1)
+
+    def _fill_scene_rows(self) -> None:
+        """填充场景页：已选（含快照）在前，其余可用场景按名排后。"""
+        selected = board_store.load_scenes()
+        placed: set[str] = set()
+        by_id = {s["scene_id"]: s for s in self._scenes_available}
+        for entry in self._initial_order:
+            if entry.get("type") != "scene":
+                continue
+            sid = entry.get("id")
+            if sid in placed:
+                continue
+            snap = next((s for s in selected if s["scene_id"] == sid), None)
+            scene = by_id.get(sid) or snap
+            if scene is None:
+                continue
+            self._add_scene_row(scene, True)
+            placed.add(sid)
+        # 已选但顺序表里没有的场景（旧数据兜底）
+        for snap in selected:
+            if snap["scene_id"] not in placed:
+                self._add_scene_row(by_id.get(snap["scene_id"], snap), True)
+                placed.add(snap["scene_id"])
+        for scene in sorted(self._scenes_available, key=lambda s: s.get("name", "")):
+            if scene.get("scene_id") and scene["scene_id"] not in placed:
+                self._add_scene_row(scene, False)
+                placed.add(scene["scene_id"])
+        self._scene_list_lay.addStretch(1)
+
+    def _make_row_base(self) -> tuple[QFrame, QHBoxLayout]:
+        """两页共用的行外壳：撑满视口宽度，右侧只留一点点边距。"""
+        row = QFrame()
         row.setObjectName("boardRow")
         row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         row.setFixedHeight(48)
-        row.setMaximumWidth(290)
-        row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        # 之前这里是定宽 290 + 右侧 16px 内边距：面板比它宽时，
+        # 卡片右边缘到滚动条之间会空出一大条（用户实测反馈太远）
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._reset_row_style(row)
         rl = QHBoxLayout(row)
-        rl.setContentsMargins(10, 8, 16, 8)
-        self._add_grip(rl)
-        name = QLabel(f"{dev.name}  ·  {dev.room_name}")
-        name.setStyleSheet(
-            f"color: {SiColors.TEXT_PRIMARY if dev.online else SiColors.OFFLINE_TEXT};"
-            " background: transparent;")
-        rl.addWidget(name, stretch=1)
+        rl.setContentsMargins(10, 8, 10, 8)
+        return row, rl
+
+    def _make_check_button(self, key: str, checked: bool) -> QPushButton:
         btn = QPushButton("✓" if checked else "+")
         btn.setFixedSize(28, 28)
         btn.setCheckable(True)
         btn.setChecked(checked)
         # 文字必须随勾选态同步：QSS 只管背景色，固定文字会绿底加号/暗底对勾
         btn.toggled.connect(lambda c, b=btn: b.setText("✓" if c else "+"))
-        # 勾选数量变了，「N 个设备 → M 行」的提示要跟着变
+        # 勾选数量变了，「N 项 → M 行」的提示要跟着变
         btn.toggled.connect(lambda _c: self._refresh_columns_ui())
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
-            f" border-radius: 14px; color: {SiColors.TEXT_PRIMARY}; }}"
-            "QPushButton:checked { background: #3dbba4; color: #0b0b0e; }"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}"
-            "QPushButton:checked:hover { background: #4ccdb5; }")
-        self._checks[dev.did] = btn
-        rl.addWidget(btn)
+        btn.setStyleSheet(check_toggle_qss(28))
+        self._checks[key] = btn
+        return btn
+
+    def _add_row(self, dev: DeviceInfo, checked: bool) -> None:
+        row, rl = self._make_row_base()
+        name = QLabel(f"{dev.name}  ·  {dev.room_name}")
+        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        name.setStyleSheet(
+            f"color: {SiColors.TEXT_PRIMARY if dev.online else SiColors.OFFLINE_TEXT};"
+            " background: transparent;")
+        rl.addWidget(name, stretch=1)
+        rl.addWidget(self._make_check_button(dev.did, checked))
         self._rows[dev.did] = row
+        self._device_keys.append(dev.did)
         # 搜索匹配用：设备名 + 房间名，大小写不敏感
         row._search_text = f"{dev.name} {dev.room_name}".lower()
         # 已选但因离线只出现在列表里的设备，标出来免得以为它在线
         row._is_offline = not dev.online
-        row.dragStarted.connect(self._on_drag_start)
-        row.dragFinished.connect(self._on_drag_finish)
         self._list_lay.addWidget(row)
 
     def _add_scene_row(self, scene: dict, checked: bool) -> None:
         """场景行：与设备行同构，标题后带「场景」标记，key 用 scene: 前缀。"""
         sid = str(scene.get("scene_id") or "")
         key = self._SCENE_PREFIX + sid
-        row = _DraggableRow(key)
-        row.setObjectName("boardRow")
-        row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        row.setFixedHeight(48)
-        row.setMaximumWidth(290)
-        row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self._reset_row_style(row)
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(10, 8, 16, 8)
-        self._add_grip(rl)
+        row, rl = self._make_row_base()
         home = str(scene.get("home_name") or "")
         label = QLabel(f"{scene.get('name') or '场景'}  ·  {home or '手动场景'}")
+        label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         label.setStyleSheet(
             f"color: {SiColors.TEXT_PRIMARY}; background: transparent;")
         rl.addWidget(label, stretch=1)
@@ -326,58 +409,35 @@ class BoardManagerDialog(OverlayDialog):
             " padding: 0 4px; font-size: 8pt;")
         rl.addWidget(tag)
         self._scene_tags.append(tag)
-        btn = QPushButton("✓" if checked else "+")
-        btn.setFixedSize(28, 28)
-        btn.setCheckable(True)
-        btn.setChecked(checked)
-        btn.toggled.connect(lambda c, b=btn: b.setText("✓" if c else "+"))
-        btn.toggled.connect(lambda _c: self._refresh_columns_ui())
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
-            f" border-radius: 14px; color: {SiColors.TEXT_PRIMARY}; }}"
-            "QPushButton:checked { background: #3dbba4; color: #0b0b0e; }"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}"
-            "QPushButton:checked:hover { background: #4ccdb5; }")
-        self._checks[key] = btn
-        rl.addWidget(btn)
+        rl.addWidget(self._make_check_button(key, checked))
         self._rows[key] = row
+        self._scene_keys.append(sid)
         row._search_text = f"{scene.get('name') or ''} {home} 场景".lower()
         row._is_offline = False
         row._is_scene = True
         row._scene = scene
-        row.dragStarted.connect(self._on_drag_start)
-        row.dragFinished.connect(self._on_drag_finish)
-        self._list_lay.addWidget(row)
+        self._scene_list_lay.addWidget(row)
 
-    def _add_grip(self, layout) -> None:
-        """行首拖拽把手：明确告诉用户"这一行可以拖"。"""
-        grip = QLabel("⠿")
-        grip.setFixedWidth(10)
-        grip.setStyleSheet(
-            f"color: {SiColors.TEXT_MUTED}; background: transparent;"
-            " font-size: 9pt;")
-        grip.setToolTip("按住这一行上下拖动可调整顺序")
-        grip.setCursor(Qt.CursorShape.OpenHandCursor)
-        layout.addWidget(grip)
+    def _apply_device_filter(self, text: str) -> None:
+        """设备页搜索：只隐藏行、不动勾选状态。"""
+        self._filter_rows(self._device_keys, text)
 
-    def _apply_filter(self, text: str) -> None:
-        """按关键字过滤设备行。
+    def _apply_scene_filter(self, text: str) -> None:
+        """场景页搜索：同样只隐藏行。"""
+        self._filter_rows(self._scene_keys, text)
 
-        只隐藏行、不动勾选状态：过滤期间取消勾选别的设备不会误伤；
-        拖拽命中也一并跳过隐藏行（见 _hit_test）。
-        """
+    def _filter_rows(self, keys: list[str], text: str) -> None:
         keyword = (text or "").strip().lower()
-        for row in self._rows.values():
-            row.setVisible(not keyword or keyword in row._search_text)
-        # 拖拽中的源行被过滤掉时，别留下半截拖拽状态
-        if self._drag_did is not None and not self._rows[self._drag_did].isVisible():
-            self._drag_did = None
+        for key in keys:
+            row = self._rows.get(key)
+            if row is not None:
+                row.setVisible(
+                    not keyword or keyword in getattr(row, "_search_text", ""))
 
     # ---------- 列数与透明度 ----------
 
     def _make_columns_section(self) -> QWidget:
-        """每行列数：分段按钮组（1–6），选中即预览。"""
+        """单排最多几张卡片：分段按钮组（1–9），选中即预览。"""
         box = QFrame()
         box.setObjectName("boardSection")
         box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -387,11 +447,10 @@ class BoardManagerDialog(OverlayDialog):
         lay = QVBoxLayout(box)
         lay.setContentsMargins(12, 8, 12, 10)
         lay.setSpacing(6)
-        # 标题行右侧放「N 个设备 → M 行」：按钮行只有 6 个按钮就占满宽度，
-        # 提示放同一行会被挤断（实测在 340px 面板下只剩「5 个设备 →」）
+        # 标题行右侧放「N 项 → M 行」：按钮行占满宽度，提示放同一行会挤断
         title_row = QHBoxLayout()
         title_row.setSpacing(6)
-        title = QLabel("一行放多少个")
+        title = QLabel("单排最多设备卡片数")
         title.setStyleSheet(
             f"color: {SiColors.TEXT_PRIMARY}; background: transparent; font-size: 9pt;")
         title_row.addWidget(title)
@@ -402,12 +461,13 @@ class BoardManagerDialog(OverlayDialog):
         title_row.addWidget(self._columns_hint)
         lay.addLayout(title_row)
         row = QHBoxLayout()
-        row.setSpacing(4)
+        # 9 个按钮要塞进 304px 的可用宽：28px 按钮 + 3px 间距 = 276px
+        row.setSpacing(3)
         self._col_buttons: list[QPushButton] = []
         self._columns = board_store.get_columns()
         for n in range(_COL_MIN, _COL_MAX + 1):
             btn = QPushButton(str(n))
-            btn.setFixedSize(34, 28)
+            btn.setFixedSize(28, 26)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _c=False, v=n: self._set_columns(v))
             self._col_buttons.append(btn)
@@ -426,12 +486,14 @@ class BoardManagerDialog(OverlayDialog):
     def _refresh_columns_ui(self) -> None:
         # 注意：非 f-string 的字面段里不能写 {{ }}，否则样式表括号不配平
         active = (
-            f"QPushButton {{ background: {SiColors.THEME}; border: none;"
-            " border-radius: 8px; color: #0b0b0e; font-weight: 600; }")
+            f"QPushButton {{ background: {SiColors.THEME};"
+            f" border: 1px solid {SiColors.THEME}; border-radius: 8px;"
+            f" color: {SiColors.ON_THEME_TEXT}; font-weight: 600; }}")
         idle = (
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
-            f" border-radius: 8px; color: {SiColors.TEXT_PRIMARY}; }}"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}")
+            f"QPushButton {{ background: {SiColors.CTRL_BG};"
+            f" border: 1px solid {SiColors.CTRL_BORDER}; border-radius: 8px;"
+            f" color: {SiColors.TEXT_PRIMARY}; }}"
+            f"QPushButton:hover {{ background: {SiColors.CTRL_BG_HOVER}; }}")
         for i, btn in enumerate(self._col_buttons):
             btn.setStyleSheet(active if i + _COL_MIN == self._columns else idle)
         n = len(self.selected_dids()) + len(self.selected_scenes())
@@ -665,15 +727,10 @@ class BoardManagerDialog(OverlayDialog):
 
     @staticmethod
     def _plain_btn_qss(primary: bool) -> str:
+        # 主按钮文字固定白色（保存/确定这类"内容文字"不随主题翻转）
         if primary:
-            return (
-                f"QPushButton {{ background: {SiColors.THEME}; border: none;"
-                " border-radius: 8px; padding: 6px 16px; color: #0b0b0e; font-weight: 600; }"
-                f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}")
-        return (
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
-            f" border-radius: 8px; padding: 6px 16px; color: {SiColors.TEXT_PRIMARY}; }}"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}")
+            return primary_button_qss()
+        return secondary_button_qss()
 
     def _make_button_row(self) -> QWidget:
         row = QHBoxLayout()
@@ -694,7 +751,7 @@ class BoardManagerDialog(OverlayDialog):
         holder.setLayout(row)
         return holder
 
-    # ---------- 拖拽排序（逻辑与托盘管理一致） ----------
+    # ---------- 行样式与结果 ----------
 
     def _reset_row_style(self, row) -> None:
         row.setStyleSheet(
@@ -702,131 +759,45 @@ class BoardManagerDialog(OverlayDialog):
             f" border: 1px solid {SiColors.LINE}; border-radius: 10px; }}"
             f"QFrame#boardRow:hover {{ background: {SiColors.CARD_HOVER}; }}")
 
-    def _on_drag_start(self, did: str) -> None:
-        self._drag_did = did
+    def _checked_keys(self, keys: list[str]) -> list[str]:
+        return [k for k in keys
+                if (btn := self._checks.get(k)) is not None and btn.isChecked()]
 
-    def _on_drag_finish(self) -> None:
-        self._drag_did = None
-        self._reset_all_rows()
-
-    def _reset_all_rows(self) -> None:
-        for row in self._rows.values():
-            self._reset_row_style(row)
-
-    def dragEnterEvent(self, e) -> None:  # noqa: N802
-        if (e.mimeData().hasText() and e.mimeData().text() in self._rows) or self._drag_did:
-            e.acceptProposedAction()
-        else:
-            e.ignore()
-
-    def dragMoveEvent(self, e) -> None:  # noqa: N802
-        if e.mimeData().hasText() and e.mimeData().text() in self._rows:
-            self._drag_did = e.mimeData().text()
-        if not self._drag_did:
-            e.ignore()
-            return
-        hovered = self._hit_test(self._map_to_host(e.position().toPoint()))
-        for did, row in self._rows.items():
-            if did == hovered and did != self._drag_did:
-                row.setStyleSheet(
-                    f"QFrame#boardRow {{ background: {SiColors.CARD_HOVER};"
-                    " border: 2px solid #3dbba4; border-radius: 10px; }}")
-            else:
-                self._reset_row_style(row)
-        e.acceptProposedAction()
-
-    def dragLeaveEvent(self, e) -> None:  # noqa: N802
-        self._reset_all_rows()
-        super().dragLeaveEvent(e)
-
-    def dropEvent(self, e) -> None:  # noqa: N802
-        self._reset_all_rows()
-        did_text = e.mimeData().text() if e.mimeData().hasText() else self._drag_did
-        if not did_text or did_text not in self._rows:
-            e.ignore()
-            return
-        self._drag_did = did_text
-        self._apply_drop(did_text, self._map_to_host(e.position().toPoint()))
-        self._drag_did = None
-        e.acceptProposedAction()
-
-    def _map_to_host(self, pos):
-        mapped = self._host.mapFrom(self, pos)
-        if self._host.rect().contains(mapped):
-            return mapped
-        viewport = self._scroll.viewport()
-        return self._host.mapFrom(viewport, viewport.mapFrom(self, pos))
-
-    def _apply_drop(self, did: str, pos) -> None:
-        src = self._rows[did]
-        target_did = self._hit_test(pos)
-        if target_did == did:
-            # 原地放下：hit_test 会命中自身，不动才不会误判为拖到末尾
-            return
-        if not target_did:
-            self._list_lay.removeWidget(src)
-            src.show()
-            self._list_lay.insertWidget(max(0, self._list_lay.count() - 1), src)
-            return
-        dst = self._rows[target_did]
-        # 先移除源行再取目标索引：removeWidget 会让后续条目前移
-        self._list_lay.removeWidget(src)
-        dst_idx = self._list_lay.indexOf(dst)
-        if dst_idx < 0:
-            return
-        src.show()
-        self._list_lay.insertWidget(dst_idx, src)
-
-    def _hit_test(self, pos) -> str | None:
-        for did, row in self._rows.items():
-            # 隐藏行（被搜索过滤掉）不参与命中，否则会拖到看不见的设备上
-            if row.isVisible() and row.geometry().contains(pos):
-                return did
-        return None
-
-    # ---------- 结果 ----------
-
-    def _selected_keys(self) -> list[str]:
-        """按当前布局顺序返回已勾选的 key（设备 did / scene:<sid>）。"""
-        result = []
-        layout = getattr(self, "_list_lay", None)
-        checks = getattr(self, "_checks", None)
-        if layout is None or checks is None:
-            return result
-        for i in range(layout.count()):
-            item = layout.itemAt(i)
-            w = item.widget() if item else None
-            if w is None:
-                continue
-            key = getattr(w, "_did", None)
-            if key and checks.get(key) is not None and checks[key].isChecked():
-                result.append(key)
-        return result
+    def _checked_scene_ids(self) -> list[str]:
+        """已勾选的场景 id（场景页顺序）。勾选按钮的 key 带 scene: 前缀。"""
+        return [sid for sid in self._scene_keys
+                if (btn := self._checks.get(self._SCENE_PREFIX + sid)) is not None
+                and btn.isChecked()]
 
     def selected_dids(self) -> list[str]:
-        """按布局顺序返回已勾选的设备 did（场景排除在外）。"""
-        return [k for k in self._selected_keys() if not k.startswith(self._SCENE_PREFIX)]
+        """已勾选的设备 did（设备页顺序）。"""
+        return self._checked_keys(self._device_keys)
 
     def selected_scenes(self) -> list[dict]:
-        """按布局顺序返回已勾选的场景快照（与 board.json 同结构）。"""
+        """已勾选的场景快照（与 board.json 同结构，场景页顺序）。"""
         result = []
-        for key in self._selected_keys():
-            if key.startswith(self._SCENE_PREFIX):
-                row = self._rows.get(key)
-                scene = getattr(row, "_scene", None)
-                if scene:
-                    result.append(dict(scene))
+        for sid in self._checked_scene_ids():
+            row = self._rows.get(self._SCENE_PREFIX + sid)
+            scene = getattr(row, "_scene", None)
+            if scene:
+                result.append(dict(scene))
         return result
 
     def ordered_items(self) -> list[dict]:
-        """设备与场景的混排顺序（写入 board.json 的 order）。"""
-        out = []
-        for key in self._selected_keys():
-            if key.startswith(self._SCENE_PREFIX):
-                out.append({"type": "scene", "id": key[len(self._SCENE_PREFIX):]})
-            else:
-                out.append({"type": "device", "id": key})
-        return out
+        """设备与场景的混排顺序（写入 board.json 的 order）。
+
+        本窗不再提供排序，但**不能顺手把顺序按"设备在前、场景在后"重写**：
+        用户可能已在挂件面板上拖好了交错顺序。这里保留打开时的既有顺序，
+        只把新勾选的项目按"设备页顺序 + 场景页顺序"追加到末尾。
+        """
+        checked = ([{"type": "device", "id": k} for k in self.selected_dids()]
+                   + [{"type": "scene", "id": k} for k in self._checked_scene_ids()])
+        keys = {(e["type"], e["id"]) for e in checked}
+        order = [e for e in self._initial_order
+                 if (e.get("type"), e.get("id")) in keys]
+        seen = {(e["type"], e["id"]) for e in order}
+        order += [e for e in checked if (e["type"], e["id"]) not in seen]
+        return order
 
     # ---------- 窗口与拖拽 ----------
 
@@ -871,23 +842,21 @@ class BoardManagerDialog(OverlayDialog):
         观感不同，统一套一种会把列数高亮和保存按钮刷错。
         """
         super().retheme()
-        self._reset_all_rows()
-        self._search.setStyleSheet(self._search_qss())
+        for row in self._rows.values():
+            self._reset_row_style(row)
+        for edit in (self._search, self._scene_search):
+            edit.setStyleSheet(self._search_qss())
         for btn in self._checks.values():
             btn.setText("✓" if btn.isChecked() else "+")
-            btn.setStyleSheet(
-                f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
-                f" border-radius: 14px; color: {SiColors.TEXT_PRIMARY}; }}"
-                "QPushButton:checked { background: #3dbba4; color: #0b0b0e; }"
-                f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}"
-                "QPushButton:checked:hover { background: #4ccdb5; }")
+            btn.setStyleSheet(check_toggle_qss(28))
         self._refresh_columns_ui()
         for label in (self._columns_hint, self._opacity_hint, self._bg_hint,
                       self._style_hint):
             label.setStyleSheet(
                 f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 8pt;")
-        self._subtitle.setStyleSheet(
-            f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
+        for label in (self._subtitle, self._scene_subtitle):
+            label.setStyleSheet(
+                f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
         for i, btn in enumerate(self._tab_buttons):
             btn.setStyleSheet(self._tab_qss(i == self._stack.currentIndex()))
         for box in self.findChildren(QFrame):

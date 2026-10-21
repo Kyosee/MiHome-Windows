@@ -43,23 +43,16 @@ class TrayController:
         act_manage = QAction("管理托盘项目", menu)
         act_manage.triggered.connect(self._emit_manage)
         menu.addAction(act_manage)
+        # 桌面挂件：只有「管理」一个入口（开关在设置里）。放在定时任务之上，
+        # 与主界面「更多」菜单的顺序保持一致
+        act_board_manage = QAction("管理桌面挂件", menu)
+        act_board_manage.triggered.connect(self._on_manage_board)
+        act_board_manage.setVisible(False)
+        menu.addAction(act_board_manage)
+        self._board_manage_action = act_board_manage
         act_schedule = QAction("定时任务", menu)
         act_schedule.triggered.connect(self._on_schedules)
         menu.addAction(act_schedule)
-        # 桌面挂件：显示/隐藏 + 管理 两条并列，入口放一起，
-        # 用户不必先找到主窗口
-        act_board = QAction("显示桌面挂件", menu)
-        act_board.triggered.connect(self._on_toggle_board)
-        menu.addAction(act_board)
-        self._board_action = act_board
-        act_board_manage = QAction("管理桌面挂件", menu)
-        act_board_manage.triggered.connect(self._on_manage_board)
-        menu.addAction(act_board_manage)
-        act_board_lock = QAction("锁定桌面挂件", menu)
-        act_board_lock.setCheckable(True)
-        act_board_lock.triggered.connect(self._on_toggle_board_lock)
-        menu.addAction(act_board_lock)
-        self._board_lock_action = act_board_lock
         act_settings = QAction("设置", menu)
         act_settings.triggered.connect(self._on_settings)
         menu.addAction(act_settings)
@@ -67,10 +60,8 @@ class TrayController:
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(self._quit)
         menu.addAction(act_quit)
-        # 每次弹出前刷新挂件菜单文案：窗口可能被挂件自己的 × 按钮关掉，
-        # 菜单若一直写「显示」会与实际状态不符
-        menu.aboutToShow.connect(self._refresh_board_action)
-        menu.aboutToShow.connect(self._refresh_board_lock_action)
+        # 每次弹出前按设置刷新挂件入口：开关关掉时"管理桌面挂件"不该出现
+        menu.aboutToShow.connect(self.refresh_board_action)
         self._tray.setContextMenu(menu)
 
         # 快捷窗口的信号接线统一在 _create_quick_window 内做一次，
@@ -160,41 +151,19 @@ class TrayController:
 
     # ---- 桌面挂件 ----
 
-    def _on_toggle_board(self) -> None:
-        """托盘菜单「桌面挂件」：已显示则隐藏，未显示则显示。"""
-        if self._board_visible():
-            self._main.hide_board()
-        else:
-            self._main.show_board()
-        self._refresh_board_action()
+    def refresh_board_action(self) -> None:
+        """按设置里的「桌面挂件」开关决定管理入口是否出现。"""
+        from app.core import board_store
 
-    def _board_visible(self) -> bool:
-        board = getattr(self._main, "_board", None)
-        return board is not None and board.isVisible()
+        self.set_board_enabled(board_store.get_enabled())
 
-    def _refresh_board_action(self) -> None:
-        """菜单文案跟随挂件实际状态，避免"显示"点了却是隐藏。"""
-        if self._board_action is not None:
-            self._board_action.setText(
-                "隐藏桌面挂件" if self._board_visible() else "显示桌面挂件")
+    def set_board_enabled(self, enabled: bool) -> None:
+        action = getattr(self, "_board_manage_action", None)
+        if action is not None:
+            action.setVisible(bool(enabled))
 
     def _on_manage_board(self) -> None:
         self._main.show_board_manager()
-
-    def _on_toggle_board_lock(self, checked: bool) -> None:
-        """托盘菜单锁定/解锁：锁定后挂件隐藏标题栏、不能拖动。"""
-        board = getattr(self._main, "_board", None)
-        if board is None:
-            return
-        board.set_locked(bool(checked))
-
-    def _refresh_board_lock_action(self) -> None:
-        board = getattr(self._main, "_board", None)
-        if self._board_lock_action is not None and board is not None:
-            locked = bool(getattr(board, "_locked", False))
-            self._board_lock_action.setChecked(locked)
-            self._board_lock_action.setText(
-                "解锁桌面挂件" if locked else "锁定桌面挂件")
 
     def _on_settings(self) -> None:
         self._main.show_settings()

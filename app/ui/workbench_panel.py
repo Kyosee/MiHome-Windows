@@ -32,7 +32,7 @@ from app.ui.prop_widgets import (
     build_prop_section,
     group_props,
 )
-from app.ui.si_theme import SiColors, themed_label
+from app.ui.si_theme import SiColors, primary_button_qss, themed_label
 from app.ui.workbench_item import WorkbenchItemWrapper
 
 
@@ -221,8 +221,7 @@ class WorkbenchPanel(QWidget):
         self._empty_add_btn.setCursor(Qt.PointingHandCursor)
         self._empty_add_btn.setFixedHeight(40)
         self._empty_add_btn.setStyleSheet(
-            f"QPushButton {{ background: {SiColors.THEME}; color: #0b0b0e; border: none; border-radius: 12px; font-size: 10pt; font-weight: 600; padding: 0 24px; }}"
-            f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}")
+            primary_button_qss("0 24px", 12, "10pt"))
         self._empty_add_btn.clicked.connect(self._open_drawer)
         el.addWidget(self._empty_add_btn, alignment=Qt.AlignCenter)
         el.addStretch(1)
@@ -233,7 +232,8 @@ class WorkbenchPanel(QWidget):
         self._footer_add_btn.setCursor(Qt.PointingHandCursor)
         self._footer_add_btn.setFixedHeight(40)
         self._footer_add_btn.setStyleSheet(
-            f"QPushButton {{ background: {SiColors.CARD}; border: 1px solid #3dbba4; border-radius: 12px; color: #3dbba4; font-size: 10pt; }}"
+            f"QPushButton {{ background: {SiColors.CARD}; border: 1px solid {SiColors.THEME};"
+            f" border-radius: 12px; color: {SiColors.THEME}; font-size: 10pt; }}"
             f"QPushButton:hover {{ background: {SiColors.CARD_HOVER}; }}")
         self._footer_add_btn.clicked.connect(self._open_drawer)
         self._footer_add_btn.hide()
@@ -436,16 +436,15 @@ class WorkbenchPanel(QWidget):
                     edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                     edit.setStyleSheet(
                         f"QLineEdit {{ background: {SiColors.WINDOW_BG}; border: 1px solid {SiColors.LINE}; border-radius: 8px; "
-                        f"padding: 6px 10px; color: {SiColors.TEXT_PRIMARY}; selection-background-color: #3dbba4; font-size: 10pt; }}"
-                        "QLineEdit:focus { border-color: #3dbba4; }"
+                        f"padding: 6px 10px; color: {SiColors.TEXT_PRIMARY};"
+                        f" selection-background-color: {SiColors.THEME}; font-size: 10pt; }}"
+                        f"QLineEdit:focus {{ border-color: {SiColors.THEME}; }}"
                     )
                     row.addWidget(edit, 1)
                     btn = QPushButton("执行")
                     btn.setFixedSize(64, 32)
                     btn.setCursor(Qt.PointingHandCursor)
-                    btn.setStyleSheet(
-                        f"QPushButton {{ background: {SiColors.THEME}; color: #0b0b0e; border: none; border-radius: 8px; font-size: 9pt; font-weight: 600; }}"
-                        f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}")
+                    btn.setStyleSheet(primary_button_qss("0", 8, "9pt"))
                     def _do_exec(n=a.name, e=edit):
                         txt = e.text().strip()
                         if not txt:
@@ -469,9 +468,7 @@ class WorkbenchPanel(QWidget):
                     btn = QPushButton("执行")
                     btn.setFixedSize(64, 32)
                     btn.setCursor(Qt.PointingHandCursor)
-                    btn.setStyleSheet(
-                        f"QPushButton {{ background: {SiColors.THEME}; color: #0b0b0e; border: none; border-radius: 8px; font-size: 9pt; font-weight: 600; }}"
-                        f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}")
+                    btn.setStyleSheet(primary_button_qss("0", 8, "9pt"))
                     btn.clicked.connect(lambda _, n=a.name: self._run_action(n))
                     lay.addWidget(btn)
                 card.setFixedHeight(76)
@@ -619,11 +616,15 @@ class WorkbenchPanel(QWidget):
     # ---------- 管理模式 ----------
 
     def _apply_header_button_styles(self) -> None:
+        # 浅色模式下 SURFACE(#eef0f3) 压在 WINDOW_BG(#f2f3f5) 上几乎看不见，
+        # 改用"白底 + 淡描边"的控件底色，并显式指定文字色，避免继承到灰字
         styles = (
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none; border-radius: 8px;"
+            f"QPushButton {{ background: {SiColors.CTRL_BG};"
+            f" border: 1px solid {SiColors.CTRL_BORDER}; border-radius: 8px;"
             f" color: {SiColors.TEXT_PRIMARY}; font-size: 9pt; }}"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}"
+            f"QPushButton:hover {{ background: {SiColors.CTRL_BG_HOVER}; }}"
             f"QPushButton[active=\"true\"] {{ background: {SiColors.THEME};"
+            f" border-color: {SiColors.THEME};"
             f" color: {SiColors.ON_THEME_TEXT}; }}")
         self._refresh_btn.setStyleSheet(styles)
         self._edit_btn.setStyleSheet(styles)

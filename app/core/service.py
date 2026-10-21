@@ -464,13 +464,16 @@ class MijiaService:
             info = spec_map.get(did)
             method = self._find_on_method(info, did) if info else None
             if method is None:
-                # spec 缺失或无开关属性，直接记为无能力
+                # spec 缺失或无开关属性，直接记为无能力。
+                # 这是常态（温度计、门磁、摄像头），按 debug 记：
+                # 按 WARNING 会在 debug.log 里造出一堆假故障
                 result[did] = None
                 entry = self._device_index.get(did, ("", "", ""))
                 self._log_switch_failure(
                     did, None, None,
                     "规格无 on 属性或规格未取到（spec_type=%r）"
-                    % (entry[1] if len(entry) > 1 else ""))
+                    % (entry[1] if len(entry) > 1 else ""),
+                    level=logging.DEBUG)
                 continue
             method_of[did] = method
             target = self._switch_target(did)
@@ -528,8 +531,13 @@ class MijiaService:
         return parent if parent is not None else did
 
     def _log_switch_failure(self, did: str, method: dict | None,
-                            item: dict | None, stage: str) -> None:
-        """同一台设备只记一次失败详情，避免 5 秒轮询把日志刷满。"""
+                            item: dict | None, stage: str,
+                            level: int = logging.WARNING) -> None:
+        """同一台设备只记一次失败详情，避免 5 秒轮询把日志刷满。
+
+        `level` 供"本来就没有开关属性"用：温度计、门磁这类设备不是失败，
+        按 WARNING 记会让 debug.log 里全是假故障，真正的问题反而被淹掉。
+        """
         logged = getattr(self, "_switch_diag_logged", None)
         if logged is None:
             logged = set()
@@ -541,7 +549,8 @@ class MijiaService:
         method = method or {}
         code = item.get("code") if isinstance(item, dict) else None
         message = item.get("message") if isinstance(item, dict) else None
-        logger.warning(
+        logger.log(
+            level,
             "开关状态读取失败 did=%s name=%r model=%r spec_type=%r "
             "siid=%s piid=%s 阶段=%s code=%s message=%s",
             did, entry[2] if len(entry) > 2 else "", entry[0] if entry else "",

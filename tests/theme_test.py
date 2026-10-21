@@ -37,6 +37,91 @@ si_theme.set_theme("dark")
 assert si_theme.SiColors.CARD == "#2a2c32"
 print("1. 调色板动态取值 + QSS 生成 OK")
 
+# ---------- 1b. 自定义主题色：派生色 + QSS + 开关拇指 ----------
+si_theme.set_accent("#3f8fd8")
+assert si_theme.SiColors.THEME == "#3f8fd8"
+assert si_theme.SiColors.THEME_HOVER != "#3f8fd8", "hover 未派生"
+assert si_theme.SiColors.THEME_DIM != "#3f8fd8", "dim 未派生"
+assert "#3f8fd8" in si_theme.build_qss(), "自定义主题色未进全局 QSS"
+# 亮色底配深字、深色底配白字
+si_theme.set_accent("#f0b429")
+assert si_theme.SiColors.ON_THEME_TEXT == "#0b0b0e"
+si_theme.set_accent("#1b2a5b")
+assert si_theme.SiColors.ON_THEME_TEXT == "#ffffff", "深色主题色上应改用白字"
+# 空/非法值回落到默认米家绿
+si_theme.set_accent("not-a-color")
+assert si_theme.SiColors.THEME == "#3dbba4"
+si_theme.set_accent(None)
+
+# 开关拇指：深浅两套主题都必须白色（深色下黑点像脏点，用户两次反馈）
+si_theme.set_theme("light")
+sw_light = si_theme.themed_switch()
+assert sw_light.style_data.thumb_color_checked.name().lower() == "#ffffff", \
+    f"浅色模式开关拇指应为白色: {sw_light.style_data.thumb_color_checked.name()}"
+si_theme.set_theme("dark")
+sw_dark = si_theme.themed_switch()
+assert sw_dark.style_data.thumb_color_checked.name().lower() == "#ffffff", \
+    f"深色模式开关拇指也应为白色: {sw_dark.style_data.thumb_color_checked.name()}"
+print("1b. 自定义主题色派生 + 开关拇指恒白 OK")
+
+# ---------- 1c. 蓝色主题色：强调色上的文字必须是白色 ----------
+si_theme.set_accent("#39a6d8")
+assert si_theme.SiColors.THEME == "#39a6d8"
+assert si_theme.SiColors.ON_THEME_TEXT == "#ffffff", (
+    "中蓝主题色上仍是近黑字：按钮/对勾会糊在蓝色里（用户截图反馈）")
+# 主按钮：白字固定，底色跟随主题色（过亮时才压暗一档）
+assert si_theme.PRIMARY_TEXT == "#ffffff"
+assert si_theme.primary_bg() == "#39a6d8"
+qss_primary = si_theme.primary_button_qss()
+assert "#39a6d8" in qss_primary and "#ffffff" in qss_primary
+si_theme.set_accent("#f0b429")   # 黄：白字会糊，底色自动压暗
+assert si_theme.primary_bg() != "#f0b429", "极亮强调色下主按钮底色应压暗"
+assert si_theme.PRIMARY_TEXT == "#ffffff", "主按钮文字应始终为白色"
+# 米家绿仍然是深字（默认观感不变）
+si_theme.set_accent(None)
+assert si_theme.SiColors.ON_THEME_TEXT == "#0b0b0e"
+
+# ---------- 1d. 调色板同步（Qt 自绘控件跟随主题） ----------
+from PySide6.QtGui import QPalette
+si_theme.set_theme("light")
+lp = si_theme.build_palette()
+assert lp.color(QPalette.ColorRole.WindowText).name() == "#17181c", "浅色调色板文字应为深色"
+assert lp.color(QPalette.ColorRole.Base).name() == "#ffffff"
+assert lp.color(QPalette.ColorRole.Window).name() == "#f2f3f5"
+assert lp.color(QPalette.ColorGroup.Disabled,
+                QPalette.ColorRole.ButtonText).name() == "#b4b6bc"
+si_theme.set_theme("dark")
+dp = si_theme.build_palette()
+assert dp.color(QPalette.ColorRole.WindowText).name() == "#e8e8ea", "深色调色板文字应为浅色"
+assert dp.color(QPalette.ColorRole.Window).name() == "#1e1f24"
+
+# 次级按钮：浅色模式下必须是"白底 + 描边"，不能与灰面板同色（看不清）
+si_theme.set_theme("light")
+qss_secondary = si_theme.secondary_button_qss()
+assert "background: #ffffff" in qss_secondary, "浅色次级按钮应为白底"
+assert "border: 1px solid #d5d8df" in qss_secondary, "浅色次级按钮缺少描边"
+_svc, _jobs = MijiaService(), JobExecutor()
+from app.ui.workbench_panel import WorkbenchPanel
+_wb = WorkbenchPanel(_svc, _jobs, None)
+assert "background: #ffffff" in _wb._refresh_btn.styleSheet(), \
+    "设备详情的「刷新/编辑功能」未用浅色可见的按钮底色"
+assert "#17181c" in _wb._refresh_btn.styleSheet(), "头部按钮文字色未跟随主题"
+_wb.deleteLater()
+_jobs.shutdown()
+si_theme.set_theme("dark")
+print("1c. 强调色文字/主按钮白字 + 1d. 调色板与次级按钮随主题 OK")
+
+# ---------- 1e. 详情页滑块：白色拇指在浅色卡片上必须能看见 ----------
+from app.siui.components.slider_ import SiSlider
+from app.ui.prop_widgets import _make_slider
+
+_sl = _make_slider()
+assert _sl.style_data.background_color.name().lower() == si_theme.SiColors.SCROLLBAR.lower(), \
+    "未播放轨道用了 SURFACE，浅色白卡上整条滑轨会消失"
+assert type(_sl)._drawThumbRect is not SiSlider._drawThumbRect, \
+    "滑块拇指缺少描边实现（白色拇指会与白卡融为一体）"
+print("1e. 滑块拇指描边 + 滑轨对比度 OK")
+
 # ---------- 2. 跟随系统解析 ----------
 settings_store.set_theme_mode("system")
 assert effective_theme("system") in ("dark", "light")
@@ -47,6 +132,21 @@ settings_store.set_theme_mode("light")
 assert settings_store.get_theme_mode() == "light"
 settings_store.set_theme_mode("dark")
 print("2. 设置存取 + 系统主题解析 OK")
+
+# ---------- 2b. 主题色设置：启动读取 / 预览不落盘 ----------
+settings_store.set_theme_accent("#e27aa8")
+assert settings_store.get_theme_accent() == "#e27aa8"
+apply_theme("dark")
+assert si_theme.SiColors.THEME == "#e27aa8", "应用主题时未读取保存的主题色"
+# 设置页预览会直接传色值，不能写回设置
+apply_theme("dark", "#3f8fd8")
+assert si_theme.SiColors.THEME == "#3f8fd8"
+assert settings_store.get_theme_accent() == "#e27aa8", "预览不应写回设置"
+# 存空串 = 默认米家绿
+settings_store.set_theme_accent("")
+apply_theme("dark")
+assert si_theme.SiColors.THEME == "#3dbba4"
+print("2b. 主题色设置读取 / 预览不落盘 OK")
 
 # ---------- 3. 启动浅色主题 + 主窗口渲染 ----------
 tray_store.save([])
@@ -104,12 +204,23 @@ assert dlg._pending_mode == "light"
 assert si_theme.current_theme() == "light"
 dlg._theme_combo.setCurrentText("深色模式")
 assert si_theme.current_theme() == "dark"
+# 主题色：保存按钮文案、预设色块、预览不落盘
+assert dlg._done_btn.text() == "保存", f"设置页按钮文案应为「保存」: {dlg._done_btn.text()}"
+assert len(dlg._accent_chips) == 4, f"主题色预设数量不符: {len(dlg._accent_chips)}"
+assert dlg._custom_accent_chip.text() == "自定义"
+dlg._accent_chips["#39a6d8"].click()
+app.processEvents()
+assert dlg._pending_accent == "#39a6d8", f"蓝色预设应为 #39A6D8: {dlg._pending_accent}"
+assert si_theme.SiColors.THEME == "#39a6d8", "主题色预览未生效"
+assert settings_store.get_theme_accent() == "", "预览主题色不应落盘"
 # 取消 → 还原为打开前（store 里是 dark，无变化）
 dlg._pending_mode = "light"
 dlg.done(QDialog.DialogCode.Rejected)
 app.processEvents()
 assert settings_store.get_theme_mode() == "dark"
-print("5. 设置下拉预览/取消还原 OK")
+assert settings_store.get_theme_accent() == "", "取消后主题色不应落盘"
+assert si_theme.SiColors.THEME == "#3dbba4", "取消后主题色未还原为默认"
+print("5. 设置下拉预览/取消还原 + 主题色 OK")
 
 # ---------- 6. 旧回归：对话框淡出关闭 ----------
 def run_dialog(dlg, name):

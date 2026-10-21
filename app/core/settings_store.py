@@ -21,9 +21,16 @@ _DEFAULTS: dict = {
     "start_minimized": False,
     "voice_fab_enabled": True,
     "theme": "system",  # system / light / dark
+    # 主题色（#rrggbb）；空串 = 默认米家绿。派生 hover/dim 与底色上的文字色
+    # 由 ui/si_theme.set_accent 统一计算，这里只存用户选的那个值。
+    "theme_accent": "",
     "hide_no_func_devices": False,
     "show_scene_tab": True,  # 主页选项卡最左侧显示「场景」入口（手动场景一键执行）
     "default_speaker_did": "",  # 小爱指令默认输出音箱；空串=自动（第一个在线）
+    # 托盘音响栏正在控制哪台音箱。与 default_speaker_did 刻意分开：
+    # 「对谁说话」和「调谁的音量」经常不是同一台（房间里放着歌，
+    # 但语音指令想发到客厅），共用一个偏好会互相覆盖。
+    "tray_audio_speaker_did": "",
     "ui_scale": 1.0,    # 界面缩放个人微调乘数（叠加在软件基准缩放之上），需重启生效
     "tray_columns": 2,  # 托盘快捷窗口卡片列数：1 或 2
     "check_update_enabled": True,  # 启动时自动检查 GitHub 新版本
@@ -89,6 +96,22 @@ def get_default_speaker_did() -> str:
 def set_default_speaker_did(value: str) -> None:
     raw = _read_raw()
     raw["default_speaker_did"] = value if isinstance(value, str) else ""
+    _write_raw(raw)
+
+
+def get_tray_audio_speaker_did() -> str:
+    """托盘音响栏正在控制的音箱 did；空串表示跟随（语音默认 → 第一个在线）。
+
+    与 `default_speaker_did` 相互独立：改音响栏不会影响语音指令发往哪台，
+    反之亦然。所选音箱离线时不强制回退写入，等它重新上线就自动回到它。
+    """
+    value = _read_raw().get("tray_audio_speaker_did", "")
+    return value if isinstance(value, str) else ""
+
+
+def set_tray_audio_speaker_did(value: str) -> None:
+    raw = _read_raw()
+    raw["tray_audio_speaker_did"] = value if isinstance(value, str) else ""
     _write_raw(raw)
 
 
@@ -179,6 +202,23 @@ def get_theme_mode() -> str:
 def set_theme_mode(value: str) -> None:
     raw = _read_raw()
     raw["theme"] = value if value in ("system", "light", "dark") else "system"
+    _write_raw(raw)
+
+
+def get_theme_accent() -> str:
+    """主题色（#rrggbb）；空串表示使用默认米家绿。"""
+    value = _read_raw().get("theme_accent", "")
+    if not isinstance(value, str):
+        return ""
+    value = value.strip().lower()
+    # 只认 #rrggbb：手改坏的值按默认色处理，不让界面刷成透明/黑块
+    return value if len(value) == 7 and value.startswith("#") else ""
+
+
+def set_theme_accent(value: str) -> None:
+    raw = _read_raw()
+    text = (value or "").strip().lower()
+    raw["theme_accent"] = text if len(text) == 7 and text.startswith("#") else ""
     _write_raw(raw)
 
 

@@ -266,8 +266,11 @@ class MainWindow(QMainWindow):
         self._more_menu.addAction(self._refresh_action)
         self._more_menu.addAction("托盘管理").triggered.connect(self.show_tray_manager)
         self._more_menu.addAction("定时任务").triggered.connect(self.show_schedules)
-        self._more_menu.addAction("桌面挂件").triggered.connect(self.show_board)
-        self._more_menu.addAction("管理桌面挂件").triggered.connect(self.show_board_manager)
+        # 桌面挂件不再是"随手开关"：在 设置 → 应用功能 里统一启用/停用。
+        # 管理入口只在启用时才出现（关闭时它无处可管，留着只会让人误解）
+        self._board_manage_action = QAction("管理桌面挂件", self._more_menu)
+        self._board_manage_action.triggered.connect(self.show_board_manager)
+        self._more_menu.addAction(self._board_manage_action)
         self._more_menu.addAction("设置").triggered.connect(self.show_settings)
         # 「关于」固定在菜单最底部
         self._more_menu.addSeparator()
@@ -353,9 +356,12 @@ class MainWindow(QMainWindow):
             f"QPushButton {{ background: {SiColors.CARD}; border: none; border-radius: 8px; }}"
             f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}")
 
-    def apply_theme_mode(self, mode: str) -> None:
-        """设置页切换主题入口：应用后经 theme_changed 信号触发重建。"""
-        self._theme_ctrl.set_mode(mode)
+    def apply_theme_mode(self, mode: str, accent: str | None = None) -> None:
+        """设置页切换主题/主题色入口：应用后经 theme_changed 信号触发重建。
+
+        `accent` 为 None 表示沿用设置里的主题色；传值则用于预览（不落盘）。
+        """
+        self._theme_ctrl.set_mode(mode, accent)
 
     def _on_system_scheme_changed(self, scheme: str) -> None:
         """系统深浅色变化：托盘图标跟随任务栏底色，与应用主题无关。"""
@@ -611,23 +617,36 @@ class MainWindow(QMainWindow):
         self._metrics.update(metrics)
         self._show_status("已从本地缓存加载，点击右上角菜单刷新可同步最新设备")
         self._apply_devices(devices)
-        self._apply_board_autostart()
+        self._apply_board_enabled()
 
-    def _apply_board_autostart(self) -> None:
-        """按设置决定挂件是否在设备就绪后自动显示。
+    def _apply_board_enabled(self) -> None:
+        """按设置里的「桌面挂件」开关显示/隐藏挂件，并同步各菜单入口。
 
-        独立于托盘的「启动时最小化到托盘」开关：托盘管的是主窗口怎么
-        起步，挂件管的是桌面是否多一块面板，两者互不覆盖。
+        开关同时承担"是否自启动"和"是否显示"两件事（旧版拆成
+        autostart + visible 两个字段，勾了却关不掉、关了又自己弹，
+        语义一直有歧义）。这里只读这一个值。
         """
+        from app.core import board_store
+
+        enabled = board_store.get_enabled()
+        self._refresh_board_menu_items()
         if self._board is None:
             return
-        from app.core import board_store
-        # 勾了「启动时显示」就强制显示；没勾则恢复上次状态
-        # （用户上次关着 → 不弹；上次开着 → 继续开着）
-        if board_store.get_autostart() or board_store.get_visible():
+        if enabled:
             self.show_board()
         else:
-            self._board.hide()
+            self.hide_board()
+
+    def _refresh_board_menu_items(self) -> None:
+        """挂件关闭时隐藏「管理桌面挂件」入口（主界面与托盘共用）。"""
+        from app.core import board_store
+
+        enabled = board_store.get_enabled()
+        action = getattr(self, "_board_manage_action", None)
+        if action is not None:
+            action.setVisible(enabled)
+        if self._tray is not None:
+            self._tray.set_board_enabled(enabled)
 
     # ---------- 定时任务 ----------
 
@@ -779,7 +798,7 @@ class MainWindow(QMainWindow):
         added, removed = self._diff_devices(devices)
         self._apply_devices(devices)
         device_cache.save(devices, self._known_power, self._metrics)
-        self._apply_board_autostart()
+        self._apply_board_enabled()
         if self._all_devices or added or removed:
             Toast.info(self, _refresh_summary(len(devices), added, removed))
 
@@ -949,28 +968,26 @@ class MainWindow(QMainWindow):
     # ---------- 桌面挂件 ----------
 
     def show_board(self) -> None:
-        """显示桌面挂件（托盘菜单 / 管理对话框 / 设置开关共用入口）。"""
+        """显示桌面挂件（设置开关 / 折叠切换共用）。
+
+        不写任何持久化状态：是否显示只由设置里的「桌面挂件」开关决定。
+        已经可见时不再 raise_，避免改设置时把焦点从设置窗抢走。
+        """
         if self._board is None:
             return
-        from app.core import board_store
-        # 记录"用户要让挂件开着"，重启后据此恢复
-        board_store.set_visible(True)
         self._board.set_devices(self._all_devices, self._known_power)
+        was_visible = self._board.isVisible()
         self._board.show()
-        self._board.raise_()
+        if not was_visible:
+            self._board.raise_()
 
     def hide_board(self) -> None:
-        """隐藏挂件（托盘菜单 / 桌面挂件开关共用）。
-
-        这是用户主动动作，要记进 `visible`，重启后保持隐藏。
-        """
+        """隐藏挂件（关闭设置开关时调用）。"""
         if self._board is not None:
-            from app.core import board_store
-            board_store.set_visible(False)
             self._board.hide()
 
     def toggle_board_collapse(self) -> None:
-        """托盘菜单「收起挂件」：折叠为细横条 / 已折叠则展开。"""
+        """折叠/展开挂件（挂件自身与托盘菜单共用）。"""
         if self._board is None:
             return
         self.show_board()
@@ -1015,11 +1032,19 @@ class MainWindow(QMainWindow):
         # 对话框遮挡会让挂件暂停「悬停恢复不透明」，否则看不到透明度效果
         if self._board is not None:
             self._board.set_previewing(True)
-        result = dlg.exec()
-        dlg.deleteLater()
-        self._board_manager = None
-        if self._board is not None:
-            self._board.set_previewing(False)
+        result = QDialog.Rejected
+        try:
+            result = dlg.exec()
+        except Exception as exc:
+            # 不兜住的话：previewing 永远停在 True（挂件不再随悬停恢复不透明），
+            # _board_manager 也永远不为 None —— 这之后管理窗再也打不开了
+            logger.exception("打开挂件管理对话框失败")
+            Toast.info(self, f"挂件管理窗打开失败：{exc}", 4000)
+        finally:
+            dlg.deleteLater()
+            self._board_manager = None
+            if self._board is not None:
+                self._board.set_previewing(False)
         if result == QDialog.Accepted:
             from app.core import board_store
             board_store.save_devices(dlg.selected_dids())
@@ -1052,6 +1077,7 @@ class MainWindow(QMainWindow):
 
     def _show_more_menu(self) -> None:
         """在更多按钮左下方弹出菜单，右边缘与按钮右边缘对齐。"""
+        self._refresh_board_menu_items()
         self._more_menu.adjustSize()
         pos = self._more_btn.mapToGlobal(self._more_btn.rect().bottomRight())
         menu_w = self._more_menu.sizeHint().width()
@@ -1140,6 +1166,9 @@ class MainWindow(QMainWindow):
         from app.core.settings_store import get_minimize_to_tray
         if self._tray is not None:
             self._tray.set_tray_visible(get_minimize_to_tray())
+        # 「桌面挂件」开关可能刚被切换：立即生效（开启即显示、关闭即隐藏），
+        # 同时刷新两个菜单里的挂件入口
+        self._apply_board_enabled()
         # “隐藏无可控制功能的设备”开关可能变化：重载并刷新展示
         from app.core.settings_store import get_hide_no_func_devices
         new_hide = get_hide_no_func_devices()
@@ -1229,15 +1258,33 @@ class MainWindow(QMainWindow):
             return
         self._refresh_power_states(force=True)
 
+    def _poll_dids(self) -> list[str]:
+        """本轮该轮询开关状态的设备：当前可见设备 + 挂件上的设备。
+
+        挂件是**独立于房间/家庭筛选**的常驻面板（见 _update_board_devices）。
+        只按 `_visible_devices()` 轮询时，主界面切到别的房间后挂件里的设备
+        就被排除在轮询之外——不是停止探测，而是"再也不刷新"：在米家 App
+        里改了开关，挂件上一直显示切换房间那一刻的旧状态。
+        """
+        dids = [d.did for d in self._visible_devices() if d.online]
+        if self._board is None:
+            return dids
+        extra = set(self._board.tracked_dids()) - set(dids)
+        if not extra:
+            return dids
+        online = {d.did: d.online for d in self._all_devices}
+        dids.extend(d for d in extra if online.get(d))
+        return dids
+
     def _refresh_power_states(self, force: bool) -> None:
-        """批量拉取当前可见设备的开关状态。
+        """批量拉取需要关注的设备开关状态。
 
         force=False 只探测还没有结论的设备（首次/新设备）；
         force=True 忽略记忆全量重读（定时轮询）。
         离线设备的云端返回值是最后一次在线时的缓存，不可信，跳过。
         """
         # 以 DeviceInfo.online 为准：离线设备的云端开关值不可信
-        dids = [d.did for d in self._visible_devices() if d.online]
+        dids = self._poll_dids()
         if not dids:
             return
         if not force:

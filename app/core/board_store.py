@@ -9,12 +9,12 @@ Board 是"常驻抬眼即用"，两者设备诉求不同（Board 放常开的灯
 托盘放偶尔查看的摄像头），互不牵连。
 
 持久化字段：
+    enabled  是否启用桌面挂件（开启即启动时显示，关闭则整块不出现）
     devices  设备 did 列表，顺序即展示顺序
-    columns  一行放多少个设备（1–6）
+    columns  单排最多放几张设备卡片（1–9）
     opacity  窗口透明度（0.30–1.00，拖动滑块时实时写入）
     geom     窗口位置与宽高，恢复上次摆放
     collapsed 折叠为细横条的开关
-    autostart 随应用启动自动显示
     bg       背景色（"#rrggbb"）；None = 跟随主题
     topmost  窗口是否置顶（默认 False：与普通窗口一样会被别的窗口盖住）
     scenes   场景快照（scene_id/name/home_id/home_name），与 devices 并列
@@ -30,7 +30,7 @@ _VERSION = 1
 _FILENAME = "board.json"
 
 _OPACITY_MIN, _OPACITY_MAX = 0.30, 1.00
-_COLUMN_MIN, _COLUMN_MAX = 1, 6
+_COLUMN_MIN, _COLUMN_MAX = 1, 9
 # 只接受 #rrggbb：写盘的值一律来自取色器或预设色板，格式不对按"跟随主题"处理
 _BG_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 # 场景快照字段：与 tray_store 保持一致，执行只认 scene_id/home_id
@@ -40,15 +40,15 @@ _SCENE_KEYS = ("scene_id", "name", "home_id", "home_name")
 def _empty() -> dict:
     return {
         "version": _VERSION,
+        # 桌面挂件总开关：开启即"常驻且启动时显示"，关闭则整块挂件不存在。
+        # 它同时替代了旧版的两个字段（autostart / visible）：
+        # 两者叠在一起时"勾了自动显示却关不掉"这类歧义都从这里来。
+        "enabled": False,
         "devices": [],
         "columns": 3,
         "opacity": 0.92,
         "geom": None,   # [x, y, w, h]
         "collapsed": False,
-        "autostart": False,
-        # 上次退出时挂件是不是开着的：用于"重启后恢复上次状态"。
-        # 与 autostart 的分工见 get_autostart 的说明。
-        "visible": False,
         # None = 跟随主题（默认，与 0.3.1 之前的行为一致）
         "bg": None,
         # 默认**不置顶**：常驻置顶会把别的窗口挡住，用户要求可关
@@ -68,9 +68,26 @@ def _read_raw() -> dict:
     devices = raw.get("devices")
     if not isinstance(devices, list) or not all(isinstance(d, str) for d in devices):
         return _empty()
+    _migrate_legacy_flags(raw)
     for k, v in _empty().items():
         raw.setdefault(k, v)
     return raw
+
+
+def _migrate_legacy_flags(raw: dict) -> None:
+    """把旧版的 autostart / visible 折算成 enabled，并清掉旧键。
+
+    旧语义：autostart=每次启动强制显示；visible=上次是否开着。两者任一为真
+    都说明用户想要挂件，折算成 enabled=True；都没有则保持关闭（不会因为
+    升级就凭空弹出一块面板）。
+    """
+    if "enabled" in raw:
+        raw.pop("autostart", None)
+        raw.pop("visible", None)
+        return
+    raw["enabled"] = bool(raw.get("autostart") or raw.get("visible"))
+    raw.pop("autostart", None)
+    raw.pop("visible", None)
 
 
 def _write_raw(raw: dict) -> None:
@@ -104,7 +121,7 @@ def save_devices(dids: list[str]) -> None:
 
 
 def get_columns() -> int:
-    """一行放多少个设备，仅认 1–6，其余值回退 3。"""
+    """单排最多放几张卡片，仅认 1–9，其余值回退 3。"""
     try:
         value = int(_read_raw().get("columns", 3))
     except (TypeError, ValueError):
@@ -164,36 +181,18 @@ def set_collapsed(value: bool) -> None:
     _write_raw(raw)
 
 
-def get_autostart() -> bool:
-    """应用启动时是否**强制**显示挂件。
+def get_enabled() -> bool:
+    """是否启用桌面挂件。
 
-    与 `get_visible` 的分工：
-    - `autostart=True`：每次启动都显示，不管上次是开还是关；
-    - `autostart=False`（默认）：跟随上次退出时的状态（`visible`）。
-    两者合起来的效果是"不勾也能记住，勾上则强制常开"。
+    开启 = 启动时自动显示并常驻（用户点 × 只是本次收起，下次启动仍会打开）；
+    关闭 = 挂件完全不出现，主界面与托盘里的挂件入口一并隐藏。
     """
-    return bool(_read_raw().get("autostart", False))
+    return bool(_read_raw().get("enabled", False))
 
 
-def set_autostart(value: bool) -> None:
+def set_enabled(value: bool) -> None:
     raw = _read_raw()
-    raw["autostart"] = bool(value)
-    _write_raw(raw)
-
-
-def get_visible() -> bool:
-    """上次挂件是否处于显示状态（由用户开关动作记录，不是每条 hide 都写）。
-
-    只记录**用户意图**：显示、点 ×、托盘菜单隐藏。
-    应用退出时的被动隐藏、以及启动时不满足条件而隐藏，都不会覆盖它——
-    否则一关程序就把"上次是开着的"抹掉，重启自然回不到原状态。
-    """
-    return bool(_read_raw().get("visible", False))
-
-
-def set_visible(value: bool) -> None:
-    raw = _read_raw()
-    raw["visible"] = bool(value)
+    raw["enabled"] = bool(value)
     _write_raw(raw)
 
 

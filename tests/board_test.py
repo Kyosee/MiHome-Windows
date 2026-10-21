@@ -21,7 +21,7 @@ isolate()
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 app = QApplication([])
 
@@ -39,6 +39,7 @@ from app.core.models import DeviceInfo
 from app.core.service import MijiaService
 from app.core.jobs import JobExecutor
 from app.ui import si_theme
+from app.ui.si_theme import SiColors
 from app.ui.theme_service import apply_theme
 from app.ui.widgets_board import WidgetsBoard, _COLLAPSE_HEIGHT
 from app.ui.board_manager import BoardManagerDialog
@@ -53,7 +54,7 @@ assert board_store.load_devices() == ["d3", "d1", "d2"], "去重保序失败"
 board_store.set_columns(4)
 assert board_store.get_columns() == 4
 board_store.set_columns(99)
-assert board_store.get_columns() == 6, "列数上限未钳制"
+assert board_store.get_columns() == 9, "列数上限未钳制"
 board_store.set_columns(0)
 assert board_store.get_columns() == 1, "列数下限未钳制"
 board_store.set_columns(3)
@@ -67,10 +68,30 @@ board_store.set_geometry(120, 80, 500, 300)
 assert board_store.get_geometry() == (120, 80, 500, 300)
 board_store.set_geometry(1, 2, 0, 0)
 assert board_store.get_geometry() is None, "非法几何未拒绝"
-board_store.set_autostart(True)
-assert board_store.get_autostart() is True
-board_store.set_autostart(False)
-print("1. board.json 存取 + 越界钳制 OK")
+board_store.set_enabled(True)
+assert board_store.get_enabled() is True
+board_store.set_enabled(False)
+assert board_store.get_enabled() is False
+# 旧版两个字段（autostart / visible）必须折算成 enabled，否则升级后
+# 用户的挂件要么凭空消失、要么莫名弹出
+import json as _json
+
+_legacy = _json_store.data_file("board.json")
+_legacy.write_text(_json.dumps(
+    {"version": 1, "devices": [], "autostart": True, "visible": False}),
+    encoding="utf-8")
+assert board_store.get_enabled() is True, "旧 autostart=True 未折算为 enabled"
+_legacy.write_text(_json.dumps(
+    {"version": 1, "devices": [], "autostart": False, "visible": True}),
+    encoding="utf-8")
+assert board_store.get_enabled() is True, "旧 visible=True 未折算为 enabled"
+_legacy.write_text(_json.dumps(
+    {"version": 1, "devices": [], "autostart": False, "visible": False}),
+    encoding="utf-8")
+assert board_store.get_enabled() is False, "旧版两项都关时不应自动开启"
+_raw = board_store._read_raw()
+assert "autostart" not in _raw and "visible" not in _raw, "迁移后应清掉旧键"
+print("1. board.json 存取 + 越界钳制 + 旧开关迁移 OK")
 
 # ---------- 2. 挂件渲染 + 空态 ----------
 apply_theme("dark")
@@ -117,9 +138,9 @@ assert w5 > w1, f"列数增加后宽度应变大: {w1} -> {w5}"
 assert board_store.get_columns() == 5
 grid = board._grid
 assert grid.count() == len(devs), f"网格条目数不符: {grid.count()}"
-# 6 列越界应被钳到 6
+# 9 列越界应被钳到 9
 board.set_columns(99)
-assert board.columns() == 6
+assert board.columns() == 9
 board.set_columns(3)
 print("3. 列数重排 OK")
 
@@ -318,7 +339,9 @@ assert target in dlg.selected_dids()
 # 取消勾选一台已选设备
 dlg._checks[devs[0].did].setChecked(False)
 assert devs[0].did not in dlg.selected_dids()
-# 列数按钮：点 4 应落盘并发出预览信号
+# 列数按钮：1–9 共 9 个，点 4 应落盘并发出预览信号
+assert len(dlg._col_buttons) == 9, f"列数按钮数量不符: {len(dlg._col_buttons)}"
+assert [b.text() for b in dlg._col_buttons] == [str(n) for n in range(1, 10)]
 for btn in dlg._col_buttons:
     if btn.text() == "4":
         btn.click()
@@ -372,20 +395,18 @@ assert win._board.collapsed is True
 win.toggle_board_collapse()
 assert win._board.collapsed is False
 
-# 启动时自动显示：勾上 → 强制显示；取消勾选后跟随上次状态（此处上次是开着）
-board_store.set_autostart(True)
-win._apply_board_autostart()
+# 桌面挂件开关：开启 → 显示；关闭 → 隐藏（开关替代旧的 autostart/visible）
+board_store.set_enabled(True)
+win._apply_board_enabled()
 app.processEvents()
-assert win._board.isVisible(), "开启启动显示后应自动显示"
-board_store.set_autostart(False)
-win._apply_board_autostart()
+assert win._board.isVisible(), "开启「桌面挂件」开关后应显示"
+board_store.set_enabled(False)
+win._apply_board_enabled()
 app.processEvents()
-assert win._board.isVisible(), "取消勾选后应跟随上次状态（上次开着 → 仍显示）"
-# 上次关着时才隐藏（四种组合的完整断言见第 9 组）
-board_store.set_visible(False)
-win._apply_board_autostart()
+assert not win._board.isVisible(), "关闭开关后应隐藏"
+board_store.set_enabled(True)
+win._apply_board_enabled()
 app.processEvents()
-assert not win._board.isVisible(), "上次关着 + 未勾选 → 不显示"
 
 # 温湿度读数同步到挂件副标题
 win.show_board()
@@ -418,43 +439,37 @@ dark = img.pixelColor(img.width() - 8, img.height() // 2)
 assert dark.name().upper() == "#1E1F24", f"切深色后面板底色未刷新: {dark.name()}"
 print("8. 主窗口接线 OK")
 
-# ---------- 9. 重启后是否恢复显示：autostart × 上次状态 四种组合 ----------
-# 规则：autostart=True 一律显示；autostart=False 跟随上次退出时的 visible
-board_store.set_autostart(False)
-board_store.set_visible(False)
-win._apply_board_autostart()
+# ---------- 9. 「桌面挂件」开关是显示与否的唯一来源 ----------
+# 旧版用 autostart + visible 两个字段表达"要不要开"，勾了关不掉、
+# 关了又自己弹。现在只有一个 enabled：开着就显示，关着就隐藏。
+board_store.set_enabled(False)
+win._apply_board_enabled()
 app.processEvents()
-assert not win._board.isVisible(), "上次关着 + 未勾自动显示 → 应保持隐藏"
+assert not win._board.isVisible(), "开关关闭 → 必须隐藏"
 
-board_store.set_visible(True)
-win._apply_board_autostart()
+board_store.set_enabled(True)
+win._apply_board_enabled()
 app.processEvents()
-assert win._board.isVisible(), "上次开着 + 未勾自动显示 → 应恢复显示"
+assert win._board.isVisible(), "开关开启 → 必须显示"
 
-board_store.set_autostart(True)
-board_store.set_visible(False)
-win._apply_board_autostart()
-app.processEvents()
-assert win._board.isVisible(), "勾了自动显示 → 无论上次状态都应显示"
-
-board_store.set_autostart(False)
-
-# 用户点 × / 托盘隐藏 → 记录 visible=False；程序退出时被动隐藏不覆盖它
-win.show_board()
-app.processEvents()
-assert board_store.get_visible() is True, "显示挂件应记录为可见"
+# 点 × 只是本次收起，不动开关（重启后仍会回来）
 win._board.hide_by_user()
 app.processEvents()
-assert board_store.get_visible() is False, "点 × 应记录为不可见"
-win.show_board()
+assert not win._board.isVisible()
+assert board_store.get_enabled() is True, "点 × 不应改开关状态"
+win._apply_board_enabled()      # 模拟下次启动
 app.processEvents()
-assert board_store.get_visible() is True
-win._board.hide()          # 模拟关闭程序时的被动隐藏
+assert win._board.isVisible(), "开关仍开着，重启应恢复显示"
+
+# 关掉开关后再启动也不该出现
+board_store.set_enabled(False)
+win._apply_board_enabled()
 app.processEvents()
-assert board_store.get_visible() is True, "被动隐藏不得覆盖用户意图（否则重启回不来）"
-win.show_board()
+assert not win._board.isVisible()
+board_store.set_enabled(True)
+win._apply_board_enabled()
 app.processEvents()
-print("9. 重启恢复显示的四种组合 + 被动隐藏不覆盖 OK")
+print("9. 桌面挂件开关决定显示（点 × 不改开关）OK")
 
 # ---------- 10. 背景色：预设 / 自定义 / 跟随主题 ----------
 # 存储层：只认 #rrggbb，非法值不写盘（写坏会把挂件刷成全黑或透明）
@@ -487,6 +502,20 @@ win._on_board_background_preview("#f5f1e8")
 app.processEvents()
 name_style = win._board._cards[devs[1].did]._name.styleSheet()
 assert "#1a1b1f" in name_style.lower(), f"浅色底上文字未转深色: {name_style}"
+
+# 2b) 边框/色块这类"结构性"颜色必须是不透明色：
+# 半透明边框在非整数缩放（系统 125% × 界面 125% = 156%）下会画成
+# 2px 渐变线，相邻卡片的对齐位置不同，看起来就是锯齿 + 角上亮斑。
+# 跟随主题用的本来就是 hex，所以这个坑只在自定义底色下出现。
+for _bg in ("#000000", "#f5f1e8"):          # 深、浅两条派生分支都要查
+    win._on_board_background_preview(_bg)
+    app.processEvents()
+    _pal = win._board.palette
+    for _name in ("line", "scrollbar", "scrollbar_hover",
+                  "state_unknown_border", "state_off", "offline_sub"):
+        _value = getattr(_pal, _name)
+        assert _value.startswith("#") and len(_value) == 7, \
+            f"自定义底色 {_bg} 下 {_name} 不是不透明色: {_value}"
 
 # 3) 折叠横条跟随同一底色（收起后不能突然变回主题灰）
 win._board._collapse()
@@ -570,14 +599,18 @@ dlg2.done(0)
 app.processEvents()
 print("12. 管理对话框背景色 + 置顶预览信号 OK")
 
-# ---------- 13. 搜索设备 + 离线设备不进候选 ----------
+# ---------- 13. 搜索设备 + 离线设备（灰名仍可见） ----------
 extra_offline = DeviceInfo(did="d_off", name="次卧无人灯", model="a.b.c",
                            home_name="家", room_name="次卧", online=False)
 search_devs = devs + [extra_offline]
 board_store.save_devices([devs[0].did])
 dlg3 = BoardManagerDialog(search_devs, None)
-# 未选中且离线的设备不该出现在候选里（用户明确要求：离线的不显示/搜不到）
-assert "d_off" not in dlg3._rows, "未选中且离线的设备不应出现在候选列表"
+# 离线设备也要能加入挂件（常驻面板常放不常开的灯），只是名字标灰
+assert "d_off" in dlg3._rows, "未勾选的离线设备也应出现在候选列表"
+off_row = dlg3._rows["d_off"]
+off_name = off_row.findChild(QLabel)
+assert off_name is not None and SiColors.OFFLINE_TEXT in off_name.styleSheet(), \
+    "离线设备名未用灰色显示"
 # 已选中的设备即使离线也要保留（否则保存时会被静默丢掉）
 board_store.save_devices([devs[0].did, extra_offline.did])
 dlg4 = BoardManagerDialog(search_devs, None)
@@ -591,23 +624,23 @@ dlg3._search.setText("设备1")
 app.processEvents()
 visible = [d for d, r in dlg3._rows.items() if not r.isHidden()]
 assert visible == [devs[1].did], f"按名称搜索未过滤: {visible}"
-# 按房间搜索：卧室里的在线设备是 d1 / d5（d3 离线且未选中，被排除）
+# 按房间搜索：卧室里的设备都该出现（含离线的 d3，现在也允许加入挂件）
 dlg3._search.setText("卧室")
 app.processEvents()
 visible = [d for d, r in dlg3._rows.items() if not r.isHidden()]
-assert set(visible) == {devs[1].did, devs[5].did}, f"按房间搜索未过滤: {visible}"
+assert set(visible) == {devs[1].did, devs[3].did, devs[5].did}, \
+    f"按房间搜索未过滤: {visible}"
 # 清空恢复全部
 dlg3._search.setText("")
 app.processEvents()
 assert all(not r.isHidden() for r in dlg3._rows.values()), "清空搜索后应恢复全部行"
-# 搜索结果为空时不崩、也不残留拖拽源
+# 搜索结果为空时不崩
 dlg3._search.setText("不存在的设备")
 app.processEvents()
 assert all(r.isHidden() for r in dlg3._rows.values())
-assert dlg3._hit_test(dlg3._host.rect().center()) is None, "过滤后不应命中隐藏行"
 dlg3.done(0)
 app.processEvents()
-print("13. 搜索设备 + 离线设备不显示 OK")
+print("13. 搜索设备 + 离线设备灰名可见 OK")
 
 # ---------- 14. 连点「+」只能开一个管理窗 ----------
 import app.ui.main_window as _mw
@@ -654,7 +687,7 @@ many = [DeviceInfo(did=f"m{i}", name=f"设备{i}", model="a.b.c", home_name="家
                    room_name="客厅", online=(i % 5 != 0)) for i in range(20)]
 many_power = {d.did: (i % 2 == 0) for i, d in enumerate(many)}
 
-# 1 列（展开 188px）+ 20 台：设备再多也不能把横条撑宽
+# 1 列 + 20 台：设备再多也不能把横条撑宽
 board_store.set_columns(1)
 board.set_columns(1)
 board_store.save_devices([d.did for d in many])
@@ -662,38 +695,42 @@ board.set_devices(many, many_power)
 board._collapse()
 app.processEvents()
 assert board.collapsed
-assert board.width() == board._board_width() == 188, \
-    f"折叠横条宽度未锚定展开宽度: {board.width()} vs {board._board_width()}"
-assert _has_aggregate(board), "20 台设备在 188px 里应降级为聚合状态条"
+one_col = board._board_width()
+assert one_col < 200, f"1 列宽度异常（卡片变宽了？）: {one_col}"
+assert board.width() == one_col, \
+    f"折叠横条宽度未锚定展开宽度: {board.width()} vs {one_col}"
+assert _has_aggregate(board), f"20 台设备在 {one_col}px 里应降级为聚合状态条"
 counts = [w.text() for w in _dot_widgets(board)
           if isinstance(w, QLabel) and w.text().endswith(" 开")]
 assert counts and counts[0].endswith("/20 开"), f"聚合模式缺计数: {counts}"
 assert "设备0" in board._bar.toolTip(), "聚合模式应在 tooltip 里给出逐台明细"
-assert board._bar_title.isHidden(), "188px 宽度下标题应隐藏，把位置让给状态"
+assert board._bar_title.isHidden(), "窄横条下标题应隐藏，把位置让给状态"
 
 # 1 列 + 8 台：体积够，回到逐台状态点
 board_store.save_devices([d.did for d in many[:8]])
 board.set_devices(many[:8], {k: v for k, v in many_power.items()
                             if k in {d.did for d in many[:8]}})
 app.processEvents()
-assert board.width() == 188
-assert not _has_aggregate(board), "8 台在 188px 里应仍用逐台状态点"
+assert board.width() == one_col
+assert not _has_aggregate(board), f"8 台在 {one_col}px 里应仍用逐台状态点"
 assert len(_dot_widgets(board)) >= 8, "状态点数量不足"
 
-# 6 列（1058px）+ 20 台：宽度跟着列数走，点也放得下
+# 6 列：宽度跟着列数走，点也放得下
 board_store.set_columns(6)
 board.set_columns(6)
 board_store.save_devices([d.did for d in many])
 board.set_devices(many, many_power)
 app.processEvents()
-assert board.width() == board._board_width() == 1058, \
-    f"改列数后折叠宽度未跟随: {board.width()}"
-assert not _has_aggregate(board), "1058px 宽度下 20 台应能用逐台状态点"
+six_col = board._board_width()
+assert six_col > one_col, f"列数增加宽度没跟着变大: {one_col} -> {six_col}"
+assert board.width() == six_col, \
+    f"改列数后折叠宽度未跟随: {board.width()} vs {six_col}"
+assert not _has_aggregate(board), f"{six_col}px 宽度下 20 台应能用逐台状态点"
 
 # 展开 → 宽度回到展开态（同一套锚点）
 board._expand()
 app.processEvents()
-assert not board.collapsed and board.width() == 1058
+assert not board.collapsed and board.width() == six_col
 print("15. 折叠宽度锚定 + 智能降级（点→聚合→宽条恢复）OK")
 
 # ---------- 16. 启动时是收起态 → 展开必须重建卡片 ----------
@@ -901,6 +938,203 @@ app.processEvents()
 assert not hint.isVisible(), "提示应在收起后隐藏"
 print("20. 自绘悬浮提示（不透明 + 主题配色）OK")
 
+# ---------- 21. 「管理桌面挂件」入口只在开关开启时出现 ----------
+board_store.set_enabled(False)
+win._apply_board_enabled()
+app.processEvents()
+assert not win._board_manage_action.isVisible(), "开关关闭时主菜单仍显示管理入口"
+if win._tray is not None:
+    assert not win._tray._board_manage_action.isVisible(), \
+        "开关关闭时托盘菜单仍显示管理入口"
+board_store.set_enabled(True)
+win._apply_board_enabled()
+app.processEvents()
+assert win._board_manage_action.isVisible(), "开关开启后主菜单应显示管理入口"
+# 主菜单：旧的「桌面挂件」随手开关已删除
+more_texts = [a.text() for a in win._more_menu.actions() if a.text()]
+assert "桌面挂件" not in more_texts, f"主菜单仍残留「桌面挂件」: {more_texts}"
+assert "管理桌面挂件" in more_texts
+if win._tray is not None:
+    tray_texts = [a.text() for a in win._tray._tray.contextMenu().actions()
+                  if a.text()]
+    assert "隐藏桌面挂件" not in tray_texts, f"托盘菜单仍残留隐藏项: {tray_texts}"
+    assert "锁定桌面挂件" not in tray_texts, f"托盘菜单仍残留锁定项: {tray_texts}"
+    assert "管理桌面挂件" in tray_texts
+    assert (tray_texts.index("管理桌面挂件")
+            < tray_texts.index("定时任务")), f"管理入口应排在定时任务之前: {tray_texts}"
+print("21. 挂件菜单入口随开关显隐 OK")
+
+# ---------- 22. 落盘位置在屏幕外 → 拉回可见区 ----------
+screen = QApplication.primaryScreen().availableGeometry()
+board_store.set_geometry(screen.right() + 5000, screen.bottom() + 5000, 420, 300)
+offscreen = WidgetsBoard(svc, jobs, None)
+geo = offscreen.geometry()
+assert screen.contains(geo.topLeft()), (
+    f"屏幕外的落盘位置未拉回：{geo.getRect()} / 屏幕 {screen.getRect()}")
+# 部分越界（右侧只剩几像素）也要保证可抓得住
+board_store.set_geometry(screen.right() - 8, screen.top() + 20, 420, 300)
+edge = WidgetsBoard(svc, jobs, None)
+assert edge.geometry().x() <= screen.right() - 59, \
+    f"右边缘越界未钳制: x={edge.geometry().x()} 屏右={screen.right()}"
+offscreen.deleteLater()
+edge.deleteLater()
+app.processEvents()
+print("22. 屏幕外几何拉回可见区 OK")
+
+# ---------- 23. 轮询清单必须覆盖挂件设备（不受房间筛选影响）----------
+win._all_devices = [
+    DeviceInfo(did="roomA", name="客厅灯", model="a.b.c", home_name="家",
+               room_name="客厅", online=True),
+    DeviceInfo(did="roomB", name="卧室灯", model="a.b.c", home_name="家",
+               room_name="卧室", online=True),
+]
+win._current_home = "家"
+win._current_room = "客厅"
+win._known_power = {"roomA": True, "roomB": True}
+assert [d.did for d in win._visible_devices()] == ["roomA"]
+board_store.save_devices(["roomB"])
+if win._board is not None:
+    win._board.set_devices(win._all_devices, win._known_power)
+    polled = win._poll_dids()
+    assert "roomB" in polled, (
+        "挂件上的设备未纳入轮询：主界面切到别的房间后，"
+        f"挂件状态再也不刷新（本轮轮询 {polled}）")
+    assert "roomA" in polled, "可见设备仍须轮询"
+win._current_room = _mw._ALL_ROOMS
+print("23. 轮询覆盖挂件设备 OK")
+
+# ---------- 24. 管理窗：设备/场景分页 + 行铺满 + 不提供排序 ----------
+_scene_a = {"scene_id": "sa", "name": "回家", "home_id": "h", "home_name": "家"}
+_scene_b = {"scene_id": "sb", "name": "离家", "home_id": "h", "home_name": "家"}
+board_store.save_devices(["d0", "d1"])
+board_store.save_scenes([_scene_a])
+board_store.save_order([{"type": "device", "id": "d0"},
+                        {"type": "scene", "id": "sa"},
+                        {"type": "device", "id": "d1"}])
+mgr = BoardManagerDialog(devs, None, scenes=[_scene_a, _scene_b])
+mgr.show()
+app.processEvents()
+assert [b.text() for b in mgr._tab_buttons] == ["设备", "场景", "外观"], \
+    f"页签不符: {[b.text() for b in mgr._tab_buttons]}"
+# 设备和场景分开两页：设备页只有设备行，场景页只有场景行
+assert "sa" in mgr._scene_keys and "sa" not in mgr._device_keys
+assert all(not k.startswith("scene:") for k in mgr._device_keys)
+# 行与滚动条之间留一小段间距（不再空一大条，也不贴死）
+gap = mgr._scroll.viewport().width() - mgr._rows["d0"].width()
+assert 4 <= gap <= 12, f"行与滚动条间距异常: {gap}px"
+# 排序功能已下线（顺序在挂件面板上拖）
+assert not hasattr(mgr, "_apply_drop") and not hasattr(mgr, "_hit_test"), \
+    "管理窗仍残留拖拽排序实现"
+# 但保存时必须保留面板上的混排顺序，不能按"设备在前场景在后"重写
+order = mgr.ordered_items()
+assert order == [{"type": "device", "id": "d0"},
+                 {"type": "scene", "id": "sa"},
+                 {"type": "device", "id": "d1"}], f"混排顺序被改写: {order}"
+# 新勾选的设备追加在末尾，已有顺序不动
+mgr._checks["d2"].setChecked(True)
+order2 = mgr.ordered_items()
+assert order2[:3] == order and order2[3] == {"type": "device", "id": "d2"}, \
+    f"新勾选未追加到末尾: {order2}"
+# 主按钮文字固定白色；勾选按钮跟着主题色走（不能再写死米家绿）
+_saved_accent = si_theme.accent()
+si_theme.set_accent("#39a6d8")
+mgr.retheme()
+_save_btn = [b for b in mgr.findChildren(QPushButton) if b.text() == "保存"][0]
+assert "color: #ffffff" in _save_btn.styleSheet(), \
+    f"保存按钮文字应为固定白色: {_save_btn.styleSheet()}"
+_chk_qss = mgr._checks["d0"].styleSheet()
+assert "#39a6d8" in _chk_qss, f"勾选按钮未跟随主题色: {_chk_qss}"
+assert "#3dbba4" not in _chk_qss, "勾选按钮仍写死米家绿"
+si_theme.set_accent(_saved_accent)
+mgr.done(0)
+app.processEvents()
+print("24. 管理窗分页 + 行铺满 + 无排序 + 按钮跟随主题色 OK")
+
+# ---------- 25. 托盘管理窗：顶部搜索框过滤 ----------
+from app.ui.tray.manager_dialog import TrayManagerDialog
+
+tm = TrayManagerDialog(devs, None, scenes=[])
+tm.show()
+app.processEvents()
+
+
+def _visible_rows(dialog):
+    out = []
+    for i in range(dialog._list_lay.count()):
+        item = dialog._list_lay.itemAt(i)
+        w = item.widget() if item else None
+        if w is not None and getattr(w, "_did", None) and w.isVisible():
+            out.append(w._did)
+    return out
+
+
+assert tm._search.isVisible(), "托盘管理窗缺少搜索框"
+total = len(_visible_rows(tm))
+tm._search.setText("卧室")
+app.processEvents()
+filtered = _visible_rows(tm)
+assert 0 < len(filtered) < total, f"搜索未过滤: {len(filtered)}/{total}"
+row_map = {}
+for _i in range(tm._list_lay.count()):
+    _w = tm._list_lay.itemAt(_i).widget()
+    if _w is not None and getattr(_w, "_did", None):
+        row_map[_w._did] = _w
+assert all("卧室" in row_map[d]._search_text for d in filtered), \
+    "过滤结果里混入了不匹配的行"
+tm._search.setText("不存在的设备")
+app.processEvents()
+assert _visible_rows(tm) == []
+tm._search.setText("")
+app.processEvents()
+assert len(_visible_rows(tm)) == total, "清空搜索后应恢复全部行"
+tm.reject()
+app.processEvents()
+print("25. 托盘管理搜索框 OK")
+
+# ---------- 26. 单排挂件：底部不留空行、不出滚动条 ----------
+board_store.set_locked(True)
+board_store.set_columns(3)
+board_store.save_devices(["d0", "d1", "d2"])
+one_row = WidgetsBoard(svc, jobs, None)
+one_row.set_devices(devs[:3], {d.did: True for d in devs[:3]})
+one_row.show()
+app.processEvents()
+bottom_gap = one_row.height() - one_row._scroll.geometry().bottom() - 1
+assert bottom_gap <= 8, f"单排时底部空出一大条: {bottom_gap}px"
+assert not one_row._scroll.verticalScrollBar().isVisible(), \
+    "单排时不应出现垂直滚动条"
+one_row.hide()
+one_row.deleteLater()
+board_store.set_locked(False)
+app.processEvents()
+print("26. 单排无底部空行 OK")
+
+# ---------- 27. 锁定隐藏标题栏后，窗口高度必须跟着收缩 ----------
+# 曾经的 bug：隐藏标题栏后内外两层布局的最小高度还没重算，resize 被夹回
+# 原高度，顶部省下的 22px 全跑到卡片下方 —— 看起来就是一条空行。
+board_store.set_locked(False)
+board_store.set_columns(3)
+board_store.save_devices(["d0", "d1", "d2"])
+locker = WidgetsBoard(svc, jobs, None)
+locker.set_devices(devs[:3], {d.did: True for d in devs[:3]})
+locker.show()
+app.processEvents()
+tall = locker.height()
+locker.set_locked(True)
+app.processEvents()
+assert locker.height() < tall, f"锁定后高度未收缩: {locker.height()} vs {tall}"
+assert locker.height() == locker._board_height(), \
+    f"锁定后高度不等于公式值: {locker.height()} vs {locker._board_height()}"
+lock_gap = locker.height() - locker._scroll.geometry().bottom() - 1
+assert lock_gap <= 8, f"锁定后底部仍空一条: {lock_gap}px"
+locker.set_locked(False)
+app.processEvents()
+assert locker.height() == tall, f"解锁后高度未还原: {locker.height()} vs {tall}"
+locker.hide()
+locker.deleteLater()
+app.processEvents()
+print("27. 锁定后高度自适应收缩 OK")
+
 # ---------- 收尾：清运行数据 ----------
 win._all_devices = []
 win._force_quit = True
@@ -910,7 +1144,7 @@ board_store.save_devices([])
 board_store.set_columns(3)
 board_store.set_opacity(0.92)
 board_store.set_collapsed(False)
-board_store.set_autostart(False)
+board_store.set_enabled(False)
 board_store.set_bg(None)
 board_store.set_topmost(False)
 si_theme.set_theme("dark")

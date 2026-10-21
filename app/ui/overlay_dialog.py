@@ -46,9 +46,11 @@ class OverlayDialog(QDialog):
 
     def _close_button_qss(self) -> str:
         return (
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
+            f"QPushButton {{ background: {SiColors.CTRL_BG};"
+            f" border: 1px solid {SiColors.CTRL_BORDER};"
             f" border-radius: 14px; color: {SiColors.TEXT_PRIMARY}; }}"
-            f"QPushButton:hover {{ background: {SiColors.DANGER}; color: {SiColors.WHITE}; }}")
+            f"QPushButton:hover {{ background: {SiColors.DANGER};"
+            f" border-color: {SiColors.DANGER}; color: {SiColors.WHITE}; }}")
 
     def _make_close_button(self) -> QPushButton:
         button = QPushButton("✕")

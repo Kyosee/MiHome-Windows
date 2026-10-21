@@ -12,7 +12,7 @@
     自由摆放   顶部拖拽区拖动窗口，位置与尺寸落盘恢复
     透明度     0.30–1.00 无级调节，鼠标悬停时自动恢复不透明便于读取
     一键收起   折叠为一条 32px 细横条，每台设备一个状态点，点一下展开
-    列数       一行放 1–6 个设备，改动即时重排
+    列数       单排最多 1–9 张卡片，改动即时重排
 
 卡片只承载「电源开关」这一条最快路径（与托盘快捷行同款）：名称 +
 房间/温湿度副标题 + 圆形电源钮；点击卡片本体打开完整详情面板。
@@ -43,10 +43,15 @@ from app.ui.power_button import PowerButton
 from app.ui.si_theme import SiColors
 
 # 卡片与窗口的尺寸基准
-_CARD_MIN_WIDTH = 168
+# 卡片最小宽度：太宽时整块面板像一排大方块（用户反馈"太宽"），
+# 148 下三行文字（名称 + 房间/读数）仍放得下，单排 9 张也不至于铺满两屏
+_CARD_MIN_WIDTH = 148
 _CARD_HEIGHT = 56
 _COLLAPSE_HEIGHT = 32
-_MARGIN = 10          # 根面板四周留白
+_MARGIN = 10          # 根面板左右留白
+# 底部留白单独给一个更小的值：卡片本身就带圆角与边框，底边再留 10px
+# 会在单排时变成一条"空行"（用户实测截图反馈），6px 与行间距 6px 对齐
+_BOTTOM_PAD = 6
 _GRID_SPACING = 6
 _DRAG_HANDLE_HEIGHT = 22
 # 判定"拖动"而非"点击"的位移阈值（像素）：太小会误判抖动，太大拖不动
@@ -84,6 +89,19 @@ def _rgba(color: QColor, alpha: float) -> str:
             f" {int(round(alpha * 255))})")
 
 
+def _solid(color: QColor, alpha: float, backdrop: QColor) -> str:
+    """半透明色 → 预混在底色上的不透明 #rrggbb。
+
+    **只用于边框、色块这类"结构性"颜色**：Qt 的样式表在画半透明圆角边框
+    时会走另一条合成路径，在非整数缩放（如 100% 系统 + 125% 界面 = 156%）
+    下，1px 圆角边框会出现明显锯齿，圆角处还会冒出亮斑。跟随主题时用的
+    本来就是不透明 hex，所以只有"自定义底色"下才看得见——用户实测反馈。
+    文字仍保留 rgba（文字抗锯齿混合半透明很正常，不会有这个问题）。
+    """
+    return _mix(backdrop, color, alpha).name()
+
+
+
 def _mix(a: QColor, b: QColor, t: float) -> QColor:
     """按比例混合两色（t=0 取 a，t=1 取 b）。"""
     t = min(max(t, 0.0), 1.0)
@@ -100,6 +118,10 @@ class _BoardPalette:
     派生规则只说一句话：**底色暗就把卡片/文字往白里提，底色亮就往黑里压**。
     这样用户选纯黑、墨蓝、米白都能正常读，不会出现黑底黑字。
     强调色（电源开态、选中态）始终沿用主题绿，两套底色下都够亮。
+
+    边框/色块一律用 `_solid` 预混成不透明 hex，只有文字保留半透明：
+    半透明圆角边框在非整数缩放下会被 Qt 画成两行渐变线并出现锯齿与
+    角部亮斑（见 `_solid` 的说明）。
     """
 
     def __init__(self, bg: str | None):
@@ -135,16 +157,16 @@ class _BoardPalette:
             self.card_border_hover = _mix(base, white, 0.30).name()
             self.surface = _mix(base, white, 0.14).name()
             self.btn_hover = _mix(base, white, 0.24).name()
-            self.line = _rgba(white, 0.14)
-            self.scrollbar = _rgba(white, 0.22)
-            self.scrollbar_hover = _rgba(white, 0.38)
+            self.line = _solid(white, 0.14, base)
+            self.scrollbar = _solid(white, 0.22, base)
+            self.scrollbar_hover = _solid(white, 0.38, base)
             self.text_primary = "#f2f3f5"
             self.text_secondary = _rgba(white, 0.66)
             self.text_muted = _rgba(white, 0.45)
             self.offline_text = _rgba(white, 0.42)
-            self.offline_sub = _rgba(white, 0.28)
-            self.state_unknown_border = _rgba(white, 0.35)
-            self.state_off = _rgba(white, 0.28)
+            self.offline_sub = _solid(white, 0.28, base)
+            self.state_unknown_border = _solid(white, 0.35, base)
+            self.state_off = _solid(white, 0.28, base)
         else:
             black = QColor(0, 0, 0)
             self.card = _mix(base, black, 0.05).name()
@@ -152,16 +174,16 @@ class _BoardPalette:
             self.card_border_hover = _mix(base, black, 0.20).name()
             self.surface = _mix(base, black, 0.07).name()
             self.btn_hover = _mix(base, black, 0.13).name()
-            self.line = _rgba(black, 0.12)
-            self.scrollbar = _rgba(black, 0.22)
-            self.scrollbar_hover = _rgba(black, 0.36)
+            self.line = _solid(black, 0.12, base)
+            self.scrollbar = _solid(black, 0.22, base)
+            self.scrollbar_hover = _solid(black, 0.36, base)
             self.text_primary = "#1a1b1f"
             self.text_secondary = _rgba(black, 0.66)
             self.text_muted = _rgba(black, 0.48)
             self.offline_text = _rgba(black, 0.38)
-            self.offline_sub = _rgba(black, 0.26)
-            self.state_unknown_border = _rgba(black, 0.30)
-            self.state_off = _rgba(black, 0.26)
+            self.offline_sub = _solid(black, 0.26, base)
+            self.state_unknown_border = _solid(black, 0.30, base)
+            self.state_off = _solid(black, 0.26, base)
 
 
 def _qcolor(spec: str) -> QColor:
@@ -361,7 +383,7 @@ class WidgetsBoard(QWidget):
             f"QFrame#boardPanel {{ background: {self._palette.window_bg};"
             f" border: 1px solid {self._palette.line}; border-radius: 14px; }}")
         root_lay = QVBoxLayout(self._root)
-        root_lay.setContentsMargins(_MARGIN, 8, _MARGIN, _MARGIN)
+        root_lay.setContentsMargins(_MARGIN, 8, _MARGIN, _BOTTOM_PAD)
         root_lay.setSpacing(6)
 
         # 顶部：拖拽把手 + 设备数 + 三个小按钮
@@ -530,11 +552,36 @@ class WidgetsBoard(QWidget):
         if geom is None:
             self._expanded_geom = self._default_geometry()
         else:
-            self._expanded_geom = geom
+            self._expanded_geom = self._sanitize_geometry(geom)
         self._apply_expanded_geometry()
         if board_store.get_collapsed():
             self._collapsed = True
             self._swap_to_collapsed()
+
+    def _sanitize_geometry(self, geom: tuple[int, int, int, int]
+                           ) -> tuple[int, int, int, int]:
+        """把落盘的位置拉回可见屏幕范围内。
+
+        落盘的位置可能已经不存在于当前桌面：拔掉副屏、改分辨率、缩小
+        缩放比之后，原来 (x, y) 落在屏幕外。挂件是无边框 Tool 窗口，
+        不占任务栏也没有标题栏，一旦整窗跑到屏幕外，用户既看不见也点
+        不到——只能删配置文件。这里按"窗口左上有 40px 落在某块屏内"判定
+        有效，否则贴回主屏右上角（与首次启动一致）。
+        """
+        x, y, w, h = geom
+        screen = QGuiApplication.screenAt(QPoint(x + 40, y + 10))
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+            if screen is None:
+                return geom
+            geo = screen.availableGeometry()
+            return (max(geo.left(), geo.right() - w - 24),
+                    max(geo.top(), geo.top() + 24), w, h)
+        geo = screen.availableGeometry()
+        # 部分越界：只把位置钳回该屏可见范围（尺寸由 _board_height 重算）
+        x = min(max(x, geo.left() - w + 60), geo.right() - 60)
+        y = min(max(y, geo.top()), geo.bottom() - 20)
+        return x, y, w, h
 
     def _default_geometry(self) -> tuple[int, int, int, int]:
         """首次启动：贴在主屏右上角（避开任务栏与桌面图标栏）。"""
@@ -553,23 +600,31 @@ class WidgetsBoard(QWidget):
         self.resize(self._board_width(), self._board_height())
 
     def _board_width(self) -> int:
-        """按列数算卡片区总宽：卡片下限宽 + 间距 + 边距。"""
+        """按列数算卡片区总宽：卡片下限宽 + 间距 + 边距。
+
+        9 列在窄屏上会宽出桌面（窗口跑出屏幕就再也点不到），这里按屏幕
+        可用宽度收住——卡片本身是可压缩的，收窄后自动均分。
+        """
         inner = _CARD_MIN_WIDTH * self._columns + _GRID_SPACING * (self._columns - 1)
-        return inner + _MARGIN * 2
+        width = inner + _MARGIN * 2
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            width = min(width, max(320, screen.availableGeometry().width() - 16))
+        return width
 
     def _board_height(self) -> int:
         """按行数算窗口高度（与真实布局边距一致，否则会出现滚动条）。
 
-        根面板：上边距 8 + 拖拽把手 22 + 把手与卡片区间距 6 + 下边距 10
-        = 46；每行卡片 56，行间距 6（末行后无间距）。额外留 4px 余量：
-        滚动区视口与内容恰好等高的 1px 舍入误差也会让滚动条冒出来。
-        设备多到超出屏幕可用高度时封顶，由滚动条接管。
+        根面板：上边距 8 + 拖拽把手 22 + 把手与卡片区间距 6 + 下边距 6
+        + 上下各 1px 边框；每行卡片 56，行间距 6（末行后无间距）。
+        只留 1px 余量吸收舍入误差——留多了会在单排时变成底部一条空行
+        （用户实测截图反馈）。设备多到超出屏幕可用高度时封顶，由滚动条接管。
         """
         rows = max(1, -(-len(self._content_items()) // max(1, self._columns)))
         body = rows * _CARD_HEIGHT + (rows - 1) * _GRID_SPACING
-        # 上边距 8 + 标题栏（锁定后隐藏，22px + 间距 6）+ 下边距 10 + 4px 余量
-        head = 8 + (0 if self._locked else _DRAG_HANDLE_HEIGHT + 6) + 10
-        height = head + body + 4
+        # 上边距 8 + 标题栏（锁定后隐藏，22px + 间距 6）+ 下边距 6
+        head = 8 + (0 if self._locked else _DRAG_HANDLE_HEIGHT + 6) + _BOTTOM_PAD
+        height = head + body + 2 + 1
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             cap = screen.availableGeometry().height() - 80
@@ -1032,6 +1087,12 @@ class WidgetsBoard(QWidget):
         handle = getattr(self, "_handle", None)
         if handle is not None:
             handle.setVisible(not self._locked)
+            # 关键：隐藏标题栏后必须先把布局的最小高度重算一遍再 resize。
+            # 否则内外两层布局都还按"标题栏在"缓存着最小高度（+28px），
+            # resize 会被夹回去——锁定后窗口留在原高度，顶部省下的空间全
+            # 跑到卡片下方，看起来就是"底部多了一条空行"（用户实测反馈）。
+            self._activate_layout(self._root)
+            self._activate_layout(self)
         if self._locked:
             # 悬停浮锁是"可发现"的那条解锁路，锁定后立刻给一次提示
             self._lock_btn.setToolTip("解锁")
@@ -1045,6 +1106,14 @@ class WidgetsBoard(QWidget):
         # 不能等用户移出再移入才触发 enterEvent
         self._refresh_lock_btn()
         self._position_lock_btn()
+
+    @staticmethod
+    def _activate_layout(widget) -> None:
+        """让布局的最小尺寸立刻反映控件显隐（不等下一轮事件循环）。"""
+        lay = widget.layout() if widget is not None else None
+        if lay is not None:
+            lay.invalidate()
+            lay.activate()
 
     def _position_lock_btn(self) -> None:
         """把浮锁按钮贴在当前可见面板的右上角。"""
@@ -1242,18 +1311,20 @@ class WidgetsBoard(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        # 记住"用户让挂件开着"：重启后据此恢复（见 board_store.get_visible）
-        board_store.set_visible(True)
         # 显示时把隐藏期间累积的读数补回卡片
         self._refresh_subtitles()
+
+    def tracked_dids(self) -> list[str]:
+        """挂件上放着的设备 did（不含场景），供主窗口纳入轮询。"""
+        return list(self._dids)
 
     def hide_by_user(self) -> None:
         """用户主动隐藏（点 ×）。
 
-        只有用户意图才改 `visible`：应用退出、启动时不满足条件而隐藏，
-        都走普通 `hide()`，不会覆盖"上次是开着的"这个记录。
+        只是本次收起：是否随应用启动显示由设置里的「桌面挂件」开关决定
+        （board_store.enabled），这里不改任何持久化状态，所以重启后
+        开关仍开着就还会出现。
         """
-        board_store.set_visible(False)
         self.hide()
 
     def refresh_power(self, dids: list[str]) -> None:
@@ -1400,8 +1471,8 @@ class WidgetsBoard(QWidget):
                 break
 
     def set_columns(self, value: int) -> None:
-        """设定一行放多少个设备（1–6），越界值落库时钳制。"""
-        self._columns = min(max(int(value), 1), 6)
+        """设定单排最多放几张卡片（1–9），越界值落库时钳制。"""
+        self._columns = min(max(int(value), 1), 9)
         board_store.set_columns(self._columns)
         if self._collapsed:
             # 折叠态宽度锚定展开宽度：改列数时横条要跟着变，
@@ -1496,10 +1567,9 @@ class WidgetsBoard(QWidget):
 
         if shiboken6.isValid(btn):
             btn.setEnabled(True)
-        name = str(scene.get("name") or "场景")
-        if error is None:
-            Toast.info(self, f"已执行：{name}", 2500)
-        else:
+        # 成功不弹提示：挂件是常驻面板，点场景后一条 Toast 会糊在卡片上
+        # 挡住设备名（用户实测反馈）。失败必须提示，否则用户以为执行了。
+        if error is not None:
             Toast.info(self, f"场景执行失败：{error}", 4000)
 
     def _bump_power_gen(self, did: str) -> None:
@@ -1845,7 +1915,7 @@ class _SceneCard(QFrame):
                 " border-radius: 14px; }"
                 f"QPushButton:hover {{ background: {SiColors.THEME_HOVER}; }}"
                 f"QPushButton:disabled {{ background: {SiColors.THEME_DIM}; }}")
-            btn.setIcon(qta.icon("mdi.play", color="#0b0b0e"))
+            btn.setIcon(qta.icon("mdi.play", color=SiColors.ON_THEME_TEXT))
 
 
 def _clamp_opacity(value: float) -> float:

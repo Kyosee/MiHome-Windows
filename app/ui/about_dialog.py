@@ -11,7 +11,7 @@ import qtawesome as qta
 
 from app import __version__
 from app.ui.overlay_dialog import OverlayDialog
-from app.ui.si_theme import SiColors
+from app.ui.si_theme import SiColors, secondary_button_qss
 from app.ui.toast import Toast
 
 GITHUB_URL = "https://github.com/huanyuejue/MiHome-Windows"
@@ -153,15 +153,10 @@ class AboutDialog(OverlayDialog):
         self._dep_label.setStyleSheet(
             f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 10pt;"
             f" a {{ color: {SiColors.THEME}; }}")
-        btn_style = (
-            f"QPushButton {{ background: {SiColors.SURFACE}; border: none;"
-            f" border-radius: 8px; padding: 8px 18px; color: {SiColors.TEXT_PRIMARY}; }}"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}"
-            f"QPushButton:disabled {{ color: {SiColors.TEXT_FAINT}; }}")
-        self._update_btn.setStyleSheet(btn_style)
+        self._update_btn.setStyleSheet(secondary_button_qss("8px 18px"))
         self._update_btn.setIcon(
             qta.icon("mdi.update", color=SiColors.TEXT_PRIMARY))
-        self._github_btn.setStyleSheet(btn_style)
+        self._github_btn.setStyleSheet(secondary_button_qss("8px 18px"))
         self._github_btn.setIcon(qta.icon("mdi.github", color=SiColors.TEXT_PRIMARY))
 
     def retheme(self) -> None:
