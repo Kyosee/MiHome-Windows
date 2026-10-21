@@ -46,6 +46,9 @@ from app.ui.si_theme import SiColors
 # 卡片最小宽度：太宽时整块面板像一排大方块（用户反馈"太宽"），
 # 148 下三行文字（名称 + 房间/读数）仍放得下，单排 9 张也不至于铺满两屏
 _CARD_MIN_WIDTH = 148
+# 单排只放 1 张时用更窄的下限：148 的卡配上短设备名会"又长又空"
+# （名称 2~4 字 + 右侧电源钮，中间一大段留白），128 下 4 字名称刚好放下
+_CARD_MIN_WIDTH_SINGLE = 128
 _CARD_HEIGHT = 56
 _COLLAPSE_HEIGHT = 32
 _MARGIN = 10          # 根面板左右留白
@@ -362,6 +365,11 @@ class WidgetsBoard(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self._save_geometry)
+        # 显式最小尺寸：窗口宽高全部由 _board_width/_board_height 计算，
+        # 没有(也不允许)手动调整大小。不设的话 Qt 用缓存的 minimumSizeHint
+        # 钳制 resize——内部控件清空后缓存不失效，单排 1 张的 148px 会被
+        # 之前宽状态留下的 165px 旧缓存顶回去（实测复现）
+        self.setMinimumSize(0, 0)
 
         # 配色表：跟随主题或用户挑的固定色（见 _BoardPalette）
         self._palette = _BoardPalette(self._bg)
@@ -402,6 +410,8 @@ class WidgetsBoard(QWidget):
 
         self._title = QLabel(_BOARD_TITLE)
         self._title.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.DemiBold))
+        # 宽度可压缩：窄挂件（单排 1 张，148px）放不下全名，由 _update_title 省略
+        self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._title.setStyleSheet(
             f"color: {self._palette.text_secondary}; background: transparent;")
         self._title.setToolTip(f"{_BOARD_TITLE}（单击收起为细横条，拖动可移动）")
@@ -485,8 +495,11 @@ class WidgetsBoard(QWidget):
             f"color: {self._palette.text_muted}; background: transparent; font-size: 9pt;")
         self._bar_grip.setToolTip("拖动可移动位置，单击展开")
         bar_lay.addWidget(self._bar_grip)
-        # 折叠态标题：只剩一条细横条时，光有状态点看不出这是谁家的挂件
+        # 折叠态标题：只剩一条细横条时，光有状态点看不出这是谁家的挂件。
+        # 宽度可压缩：窄挂件（单排 1 张）下横条不能把窗口最小宽度顶大，
+        # 放不下时由 _dot_plan 自动隐藏标题、只留状态点
         self._bar_title = QLabel(_BAR_TITLE)
+        self._bar_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._bar_title.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
         self._bar_title.setStyleSheet(
             f"color: {self._palette.text_secondary}; background: transparent; font-size: 8pt;")
@@ -605,7 +618,9 @@ class WidgetsBoard(QWidget):
         9 列在窄屏上会宽出桌面（窗口跑出屏幕就再也点不到），这里按屏幕
         可用宽度收住——卡片本身是可压缩的，收窄后自动均分。
         """
-        inner = _CARD_MIN_WIDTH * self._columns + _GRID_SPACING * (self._columns - 1)
+        # 单排 1 张时用更窄的卡宽：名称普遍只有 2~4 字，148 显得空旷
+        unit = _CARD_MIN_WIDTH_SINGLE if self._columns == 1 else _CARD_MIN_WIDTH
+        inner = unit * self._columns + _GRID_SPACING * (self._columns - 1)
         width = inner + _MARGIN * 2
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
@@ -833,6 +848,13 @@ class WidgetsBoard(QWidget):
         self._root.hide()
         self._bar.show()
         self._collapsed = True
+        # 先摘掉上一轮的状态行再 resize：旧聚合条/计数 label 的
+        # minimumWidth 会把 resize 顶大（单排 1 张时 148 被顶成 165），
+        # 之后再按新宽度重建状态行
+        self._clear_dots()
+        # 布局最小宽会被 Qt 回写到 minimumSize() 且延迟生效：旧状态行
+        # （聚合条+计数）的最小宽 165 会钳制这里的 resize，必须先重置
+        self.setMinimumSize(0, 0)
         self.resize(self._board_width(), _COLLAPSE_HEIGHT)
         self._sync_dots()
         # 折叠/展开不淡变透明度：windowOpacity 是用户设定值，动画会
@@ -1198,6 +1220,21 @@ class WidgetsBoard(QWidget):
             items.append((dev, self._known_power.get(did), dev.online))
         return items
 
+    def _clear_dots(self) -> None:
+        """摘掉折叠横条上一轮的状态行（状态点/聚合条/计数）。
+
+        先摘掉父子关系再 deleteLater：只是移出布局的话，旧控件
+        （几何还是旧宽度）会继续画在新内容上面，表现为「换成小圆点后
+        屏幕上却是一排长条」。另外旧控件的 minimumWidth 会把之后的
+        resize 顶大（单排 1 张时 148 被顶成 165），折叠/改列数前必须先清。
+        """
+        while self._dot_lay.count():
+            item = self._dot_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
     def _sync_dots(self) -> None:
         """重建折叠横条的状态表达：逐台状态点，太多则降级为聚合比例条。
 
@@ -1208,15 +1245,7 @@ class WidgetsBoard(QWidget):
         """
         import shiboken6
 
-        while self._dot_lay.count():
-            item = self._dot_lay.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                # 先摘掉父子关系再 deleteLater：只是移出布局的话，
-                # 旧状态点/聚合条（几何还是旧宽度）会继续画在新内容上面，
-                # 表现为「换成小圆点后屏幕上却是一排长条」
-                w.setParent(None)
-                w.deleteLater()
+        self._clear_dots()
 
         items = self._collapsed_items()
         self._bar.setToolTip(self._bar_tooltip(items))
@@ -1262,6 +1291,9 @@ class WidgetsBoard(QWidget):
         self._dot_lay.addWidget(bar, stretch=1)
         on = sum(1 for _dev, state, online in items if online and state is True)
         count = QLabel(f"{on}/{len(items)} 开")
+        # 计数文字可压缩：窄挂件（单排 1 张）下横条不能把窗口最小宽度顶大，
+        # 极窄时文字被裁掉的部分在 tooltip 里仍能看到
+        count.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         count.setStyleSheet(
             f"color: {self._palette.text_secondary}; background: transparent;"
             " font-size: 8pt;")
@@ -1278,6 +1310,11 @@ class WidgetsBoard(QWidget):
         self._known_power = dict(known_power)
         self._dids = board_store.load_devices()
         if self._collapsed:
+            # 设备数量变化会改变状态行内容，横条宽度要重新锚到展开宽度
+            # （先清旧状态行，否则其最小宽会把 resize 顶大）
+            self._clear_dots()
+            self.setMinimumSize(0, 0)
+            self.resize(self._board_width(), _COLLAPSE_HEIGHT)
             self._sync_dots()
         else:
             self._rebuild()
@@ -1401,8 +1438,9 @@ class WidgetsBoard(QWidget):
         self._scenes = board_store.load_scenes()
         self._order = board_store.load_order()
         items = self._content_items()
-        # 标题带产品名：桌面上可能同时开着一堆挂件，得能认出这是谁家的
-        self._title.setText(f"{_BOARD_TITLE} · {len(items)}")
+        # 标题带产品名：桌面上可能同时开着一堆挂件，得能认出这是谁家的；
+        # 窄挂件放不下全名，按剩余宽度省略（完整名在 tooltip 里）
+        self._update_title(len(items))
         if not items:
             self._empty.show()
             self._scroll.hide()
@@ -1447,6 +1485,15 @@ class WidgetsBoard(QWidget):
         if online:
             self.refresh_power(online)
 
+    def _update_title(self, count: int) -> None:
+        """标题 = 产品名 + 数量，按窗口宽度省略（窄挂件放不下全名）。"""
+        full = f"{_BOARD_TITLE} · {count}"
+        # 4 个工具钮 22px + 分隔线/间距约 20 + 根面板边距，给标题留余量
+        reserved = sum(b.width() for b in self._tool_buttons) + 34
+        avail = max(36, self._board_width() - reserved)
+        self._title.setText(
+            self._title.fontMetrics().elidedText(full, Qt.ElideRight, avail))
+
     def _destroy_grid(self) -> None:
         grid = getattr(self, "_grid", None)
         if grid is None:
@@ -1476,7 +1523,9 @@ class WidgetsBoard(QWidget):
         board_store.set_columns(self._columns)
         if self._collapsed:
             # 折叠态宽度锚定展开宽度：改列数时横条要跟着变，
-            # 否则管理窗里调完列数、收起后宽度还对不上
+            # 否则管理窗里调完列数、收起后宽度还对不上。
+            # resize 前先清掉旧状态行（其 minimumWidth 会顶大 resize）
+            self._clear_dots()
             self.resize(self._board_width(), _COLLAPSE_HEIGHT)
             self._sync_dots()
             return

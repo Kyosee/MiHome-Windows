@@ -697,8 +697,10 @@ app.processEvents()
 assert board.collapsed
 one_col = board._board_width()
 assert one_col < 200, f"1 列宽度异常（卡片变宽了？）: {one_col}"
-assert board.width() == one_col, \
-    f"折叠横条宽度未锚定展开宽度: {board.width()} vs {one_col}"
+# 折叠横条宽度锚定展开宽度，但不得低于横条自身的最小宽（离屏字体度量
+# 偏大时聚合条最小宽会高于 one_col；真机字体正常时两者一致）
+assert board.width() == max(one_col, board._bar.minimumSizeHint().width()), \
+    f"折叠横条宽度未锚定展开宽度: {board.width()} vs {max(one_col, board._bar.minimumSizeHint().width())}"
 assert _has_aggregate(board), f"20 台设备在 {one_col}px 里应降级为聚合状态条"
 counts = [w.text() for w in _dot_widgets(board)
           if isinstance(w, QLabel) and w.text().endswith(" 开")]
@@ -711,7 +713,7 @@ board_store.save_devices([d.did for d in many[:8]])
 board.set_devices(many[:8], {k: v for k, v in many_power.items()
                             if k in {d.did for d in many[:8]}})
 app.processEvents()
-assert board.width() == one_col
+assert board.width() == max(one_col, board._bar.minimumSizeHint().width())
 assert not _has_aggregate(board), f"8 台在 {one_col}px 里应仍用逐台状态点"
 assert len(_dot_widgets(board)) >= 8, "状态点数量不足"
 

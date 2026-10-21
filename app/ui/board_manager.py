@@ -568,35 +568,41 @@ class BoardManagerDialog(OverlayDialog):
         return box, lay
 
     def _make_background_section(self) -> QWidget:
-        """背景色：标题行放「跟随主题 / 自定义颜色…」，下面一行预设色块。
-
-        这样只占两行：之前三种控件挤一行会把「自定义颜色…」压成「定义」，
-        拆成两行又白白多出一行高度。
+        """背景色：「背景色」单独一行做标题（右侧放当前值提示），
+        下一行排「跟随主题 / 自定义…」和预设色块，视觉层级更清楚。
         """
         box, lay = self._make_section_box()
-        head = QHBoxLayout()
-        head.setSpacing(6)
+
+        # 标题行：标题单独一行，右端是当前取值提示（跟随主题 / 色号）
+        title_row = QHBoxLayout()
+        title_row.setSpacing(6)
         title = QLabel("背景色")
         title.setStyleSheet(
             f"color: {SiColors.TEXT_PRIMARY}; background: transparent; font-size: 9pt;")
-        head.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        self._bg_hint = QLabel()
+        self._bg_hint.setStyleSheet(
+            f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 8pt;")
+        title_row.addWidget(self._bg_hint)
+        lay.addLayout(title_row)
 
+        # 控件行 1：跟随主题 / 自定义
         self._bg_chips: list[QPushButton] = []
         # 索引 0 固定是「跟随主题」：refresh 时按它判断当前是否为自动模式
         auto = self._make_text_chip("跟随主题", "深浅色主题切换时挂件自动适配")
         auto.clicked.connect(lambda: self._choose_bg(None))
         self._bg_chips.append(auto)
-        head.addWidget(auto)
-        custom = self._make_text_chip("自定义…", "打开取色器，选任意颜色")
+        custom = self._make_text_chip("自定义颜色", "打开取色器，选任意颜色")
         custom.clicked.connect(self._choose_custom_bg)
-        head.addWidget(custom)
-        head.addStretch(1)
-        self._bg_hint = QLabel()
-        self._bg_hint.setStyleSheet(
-            f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 8pt;")
-        head.addWidget(self._bg_hint)
-        lay.addLayout(head)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        mode_row.addWidget(auto)
+        mode_row.addWidget(custom)
+        mode_row.addStretch(1)
+        lay.addLayout(mode_row)
 
+        # 控件行 2：预设色块（单独一行，挤在一起会被裁切）
         row = QHBoxLayout()
         row.setSpacing(6)
         for label, color in _PRESET_BG:
