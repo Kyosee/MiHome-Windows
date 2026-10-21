@@ -10,9 +10,13 @@
 - **扫码登录**：米家 APP 扫二维码，登录凭据与上游依赖的 CLI 共用
 - **设备列表**：按家庭、房间分组，实时显示在线状态，支持隐藏无功能设备
 - **场景执行**：主页「场景」选项卡列出米家 APP 中创建的手动场景，一键执行（可在设置中隐藏该入口）
+- **定时开关**：给指定设备配「每天某时刻打开/关闭」，同一设备可配多条（如 7:00 开灯、23:00 关灯）；到点自动执行并提示，错过时间不补执行只提醒。**需应用保持运行**（最小化到托盘也算），关掉程序不会触发
 - **设备控制**：根据设备 spec 元数据自动生成控件——布尔属性映射开关、数值属性映射滑块（自动套用范围与步长）、枚举属性映射下拉框
 - **动作执行**：设备支持的动作渲染为按钮，执行前二次确认
 - **系统托盘**：最小化到托盘，支持快捷设备控制、场景一键执行、小爱音响快捷控制、小爱语音指令，托盘快捷窗口支持单列/双列卡片切换与设备/场景混排排序
+- **桌面挂件**：常驻桌面的设备控制面板——自选放哪些设备、无级调透明度、调一行放多少个（1–6）、一键收起为细横条、背景色可调；窗口可置顶可关；设备清单与托盘快捷窗口相互独立
+- **定时任务**：针对具体设备定时设置开启、关闭
+- **虚拟开关支持**：针对多键开关虚拟的独立开关支持独立控制
 - **主题配色**：深色 / 浅色 / 跟随系统（设置中切换，米家绿主题色两种模式一致）；托盘图标自动跟随 Windows 任务栏深浅色
 - **界面缩放**：50%–200% 无级调节（叠加在系统缩放之上），需重启生效
 - **开机自启动**：可选，写入当前用户注册表（HKCU Run）
@@ -63,6 +67,8 @@ python -m venv .venv
 | `settings.json` | 应用设置（主题、缩放、托盘、自启动等） |
 | `tray.json` | 托盘快捷控制面板的设备/场景配置与显示顺序 |
 | `workbench.json` | 工作台（设备详情页）的自定义布局 |
+| `board.json` | 桌面挂件配置（设备列表、每行列数、透明度、位置尺寸、折叠态、启动显示、背景色、是否置顶） |
+| `schedules.json` | 定时开关规则（设备、时刻、动作、是否启用、最后执行日期） |
 | `devices_cache.json` | 设备列表与状态缓存，启动时优先从缓存加载以加快首屏显示 |
 
 > 路径中的 `%LOCALAPPDATA%` 通常为 `C:\Users\<用户名>\AppData\Local`。
@@ -80,6 +86,11 @@ python -m venv .venv
 
 > 路径中的 `~` 在 Windows 上为 `C:\Users\<用户名>`。
 
+**卸载重装为什么不用重新扫码？** 因为凭据不在安装目录、也不在
+`%LOCALAPPDATA%\MiHome-Windows` 里：卸载程序只会问要不要删后者，`auth.json`
+始终保留。所以「卸载 → 重装 → 打开已是登录态」是预期行为。想验证全新安装的流程，
+把 `auth.json` 临时改名（如 `auth.json.bak`）再启动即可——那才会弹二维码。
+
 ## 构建可执行文件
 
 项目使用 **[Nuitka](https://nuitka.net/)** 将 Python 源码编译打包为原生 Windows 可执行文件（standalone 模式：把 Python 解释器、全部依赖与资源文件整合进一个免安装目录，最终产出 `dist\MiHome-Windows.exe`）。Nuitka 是真编译器——把代码编译为 C 再编译为机器码，而非 PyInstaller 式的"打包字节码"，这也是需要 VS Build Tools 的原因。
@@ -89,27 +100,51 @@ python -m venv .venv
 | 工具 | 版本 | 说明 |
 |------|------|------|
 | Python | >= 3.10 | 需加入系统 PATH，构建脚本会自动创建 venv |
-| VS Build Tools | 2022 | Nuitka 编译所需的 C 编译器，约 2 GB |
+| C 编译器 | **MSVC（VS Build Tools / VS Community）** | 必须与 **Windows SDK** 一起装，见下 |
+| 项目路径 | **纯 ASCII** | 路径含中文会导致构建失败，见下 |
 
-下载安装 VS Build Tools 2022：https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
+**① 装 MSVC + Windows SDK（必须两个都装）**
 
-安装时勾选 **"使用 C++ 的桌面开发"** 工作负载。
+打开 **Visual Studio Installer** → 修改已装的 VS：
+
+- 「工作负载」标签 → 勾 **使用 C++ 的桌面开发**（会连带 Windows SDK）；
+- 或「单个组件」标签 → 搜 `Windows SDK` → 勾 **Windows 11 SDK (10.0.26100.0)**
+  （有 10.0.22621.0 也可以）。
+
+> 只装 MSVC 不装 SDK 时，`cl.exe` 存在、vcvars 也能"激活成功"，但编译阶段
+> 必然失败。构建脚本会**提前检查 SDK 并明确报错**。
+
+**② 项目路径必须是纯英文**
+
+Nuitka 依赖的 `depends.exe` 不支持非 ASCII 路径（会把中文写成 `0x04` 占位
+字节），构建会在依赖扫描阶段崩掉。项目目录请放在纯英文路径下，
+例如 `E:\IDE\DeepSeekHarness\MiHome-Windows-Main`。构建脚本会先检查路径并提示。
 
 ### 一键构建
 
 ```powershell
-git clone https://github.com/huanyuejue/MiHome-Windows.git
-cd MiHome-Windows
+cd MiHome-Windows-Main
 
-# 双击 build_msvc.bat 或运行：
 .\build.ps1
 ```
 
-脚本自动完成：创建 venv → 安装依赖（含 Nuitka 本体）→ 激活 MSVC 编译环境 → Nuitka 编译 → 输出到 `dist/MiHome-Windows.exe`。
+脚本自动完成：创建 venv → 安装依赖（含 Nuitka 本体）→ 激活 MSVC 环境 → Nuitka 编译
+→ 输出到 `dist\MiHome-Windows.exe`，并做一次**隐私自检**（确认产物里没有
+登录凭据与设备数据）。
 
-构建参数（打包资源清单、图标、排除项等）集中维护在 `build.ps1` 的 `$NuitkaArgs`；`build_msvc.bat` 只是转发到它的双击入口。
+> **产物不带个人米家信息**：账号凭据、设备列表、挂件/定时配置都只存在用户目录
+> （见上节），编译时不会打进 `dist\`；隐私自检发现任何一份就报错终止。
+> 别人拿到你的 `dist\` 或安装包，仍然是他自己的账号、自己的设备。
+
+> **产物是"一个 exe + 一堆依赖目录"**，不是单文件。只拷 `MiHome-Windows.exe`
+> 到别的机器是跑不起来的，必须整个 `dist\` 目录一起分发（或做安装包，见下）。
+
+构建参数（打包资源清单、图标、排除项等）集中维护在 `build.ps1` 的 `$NuitkaArgs`；
+`build_msvc.bat` 只是转发到它的双击入口。
 
 首次构建耗时较长（创建 venv + 下载依赖 + Nuitka 编译，通常 5–15 分钟，视机器而定）
+
+
 
 ## 项目结构
 
@@ -124,6 +159,9 @@ app/
 │   ├── settings_store.py       # 应用设置持久化（含开机自启动注册表）
 │   ├── tray_store.py           # 托盘配置持久化
 │   ├── workbench_store.py      # 工作台配置持久化
+│   ├── board_store.py          # 桌面挂件配置持久化（设备/列数/透明度/几何）
+│   ├── schedule_store.py       # 定时开关规则持久化
+│   ├── scheduler.py            # 定时判定（纯逻辑：到点/错过，不依赖 Qt）
 │   ├── update_checker.py       # GitHub Releases 新版本检查（后台线程 + 信号）
 │   └── restart.py              # 应用自重启（缩放等设置需重启生效时一键重启）
 ├── ui/                         # 界面层
@@ -137,6 +175,9 @@ app/
 │   ├── device_dialog.py        # 设备详情对话框
 │   ├── workbench_panel.py      # 工作台面板（属性/动作）
 │   ├── workbench_item.py       # 工作台属性/动作项
+│   ├── widgets_board.py        # 桌面挂件窗口（常驻置顶/拖动/透明度/折叠横条）
+│   ├── board_manager.py        # 桌面挂件管理对话框（勾选+排序+列数+透明度）
+│   ├── schedule_dialog.py      # 定时任务对话框（按设备配时间与开/关）
 │   ├── prop_widgets.py         # 属性控件（开关、滑块、下拉框）
 │   ├── power_button.py         # 三态电源按钮（卡片/托盘/详情共用）
 │   ├── overlay_dialog.py       # 遮罩对话框基类（详情/设置/抽屉共用）
@@ -161,7 +202,15 @@ app/
 
 tests/
 ├── smoke_test.py               # 上游升级后的接口兼容性自检
-└── theme_test.py               # 主题切换回归（离屏像素断言）
+├── theme_test.py               # 主题切换回归（离屏像素断言）
+├── board_test.py               # 桌面挂件回归（离屏渲染/收起/透明度/管理对话框）
+├── latency_test.py             # 开关响应速度回归（队列优先级/单次写/乐观回滚）
+├── race_test.py                # 开关状态回弹回归（过期轮询不得覆盖本地操作）
+├── schedule_test.py            # 定时开关回归（到点/错过/停用/界面接线）
+└── subdevice_test.py           # 多键面板虚拟子设备的通道映射回归
+
+tools/
+└── diag_switch.py              # 只读诊断：打印云端对多键面板各 did/siid 的原始返回
 
 run.py                          # 程序入口
 start.bat                       # Windows 一键运行（双击运行）
@@ -181,6 +230,17 @@ LICENSE                         # GPL-3.0 许可证
 | qtawesome | >=1.4 | Material Design 图标 |
 | numpy | - | SiliconUI 动画插值 |
 | typing_extensions | - | SiliconUI 在 Python 3.10 下所需的类型别名 |
+
+## 排查问题
+
+出问题时先看日志：源码模式在项目根的 `debug.log`，构建版在
+`%LOCALAPPDATA%\MiHome-Windows\debug.log`（`run.py` 运行期隐藏控制台，
+日志是唯一线索）。云端返回的原始错误码可用诊断脚本查看：
+
+```powershell
+.venv\Scripts\python.exe -X utf8 -m tools.diag_switch
+```
+
 
 ## 开源许可
 
