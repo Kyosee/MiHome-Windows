@@ -56,9 +56,6 @@ from app.ui.si_theme import SiColors
 # 卡片最小宽度：太宽时整块面板像一排大方块（用户反馈"太宽"），
 # 148 下三行文字（名称 + 房间/读数）仍放得下，单排 9 张也不至于铺满两屏
 _CARD_MIN_WIDTH = 148
-# 单排只放 1 张时用更窄的下限：148 的卡配上短设备名会"又长又空"
-# （名称 2~4 字 + 右侧电源钮，中间一大段留白），128 下 4 字名称刚好放下
-_CARD_MIN_WIDTH_SINGLE = 128
 _CARD_HEIGHT = 56
 _COLLAPSE_HEIGHT = 32
 # 悬停恢复不透明 / 移开回落的过渡时长：太短像瞬变，太长显得拖沓
@@ -284,6 +281,18 @@ class _FloatingHint(QWidget):
         painter.end()
 
 
+class _FlexLabel(QLabel):
+    """宽度可压缩的标签：布局按 sizeHint 分配，最小宽度允许压到 0。
+
+    QLabel 默认的 minimumSizeHint 就是文字宽度，标题一长就把所在行
+    （标题栏/折叠横条）的最小宽顶大，进而钳制窗口 resize——从多列
+    切到单列后窗口缩不回去就是这个原因。
+    """
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, super().minimumSizeHint().height())
+
+
 class _AggregateBar(QWidget):
     """折叠横条的聚合状态条：每台设备一段，按开 / 关 / 未知 / 离线着色。
 
@@ -427,7 +436,7 @@ class WidgetsBoard(QWidget):
         hl.setContentsMargins(2, 0, 2, 0)
         hl.setSpacing(4)
 
-        self._title = QLabel(_BOARD_TITLE)
+        self._title = _FlexLabel(_BOARD_TITLE)
         self._title.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.DemiBold))
         # 宽度按省略后的文本走：Ignored 会被布局压成 0 宽，标题直接看不见；
         # 窄挂件（单排 1 张）放不下全名时由 _update_title 先省略
@@ -523,7 +532,7 @@ class WidgetsBoard(QWidget):
         # 折叠态标题：只剩一条细横条时，光有状态点看不出这是谁家的挂件。
         # 用 Preferred 而不是 Ignored：Ignored 会被布局压成 0 宽，即使
         # _dot_plan 算出来放得下也看不见；空间不够时由 _dot_plan 主动隐藏
-        self._bar_title = QLabel(_BAR_TITLE)
+        self._bar_title = _FlexLabel(_BAR_TITLE)
         self._bar_title.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self._bar_title.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
@@ -644,8 +653,9 @@ class WidgetsBoard(QWidget):
         9 列在窄屏上会宽出桌面（窗口跑出屏幕就再也点不到），这里按屏幕
         可用宽度收住——卡片本身是可压缩的，收窄后自动均分。
         """
-        # 单排 1 张时用更窄的卡宽：名称普遍只有 2~4 字，148 显得空旷
-        unit = _CARD_MIN_WIDTH_SINGLE if self._columns == 1 else _CARD_MIN_WIDTH
+        # 单列与多列统一卡宽：单列再收窄会让窗口忽宽忽窄，卡片内容
+        # 的最小宽也会反过来把窗口顶大（见 _rebuild 里的 setMinimumSize）
+        unit = _CARD_MIN_WIDTH
         inner = unit * self._columns + _GRID_SPACING * (self._columns - 1)
         width = inner + _MARGIN * 2
         screen = QGuiApplication.primaryScreen()
@@ -1622,19 +1632,51 @@ class WidgetsBoard(QWidget):
             pos = self.geometry().topLeft()
             self._expanded_geom = (pos.x(), pos.y(),
                                    self._board_width(), self._board_height())
+            # 旧布局（宽卡片 + 多列）的 minimumSizeHint 会残留并钳制 resize：
+            # 从多列切到单列时窗口缩不回去，必须先把最小尺寸清掉再重设
+            self.setMinimumSize(0, 0)
+            self._host.setMinimumSize(0, 0)
+            self._host.updateGeometry()
             self.resize(self._board_width(), self._board_height())
+            # 布局事件（滚动条出现、标题栏最小宽）可能在 resize 之后把
+            # 窗口撑回旧宽度，下一轮事件循环再校一次
+            QTimer.singleShot(0, self._enforce_target_width)
             self._save_timer.start()
         online = [d.did for d in self._devices
                   if d.online and self._known_power.get(d.did) is None]
         if online:
             self.refresh_power(online)
 
+    def _enforce_target_width(self) -> None:
+        """按目标宽度校正窗口：布局把窗口撑大时再收一次。
+
+        滚动条出现、标题栏/卡片最小宽都可能让 resize 之后的布局事件
+        把窗口顶回旧宽度；单列这种窄布局最明显，表现为「切列数后卡片
+        还是旧宽度，收起展开才恢复」。宽度已经正确时不做任何事。
+        """
+        import shiboken6
+
+        if (not shiboken6.isValid(self) or self._collapsed
+                or not self.isVisible()):
+            return
+        target = self._board_width()
+        if self.width() != target:
+            self.resize(target, self._board_height())
+
     def _update_title(self, count: int) -> None:
-        """标题 = 产品名 + 数量，按窗口宽度省略（窄挂件放不下全名）。"""
+        """标题 = 产品名 + 数量，按窗口宽度省略；窄到读不出字就整块收起。
+
+        单列窗口（168px）里工具钮已经占掉大半，标题只剩十几个像素，
+        强行省略只会留下一截残影，不如让位给按钮、保持标题行干净。
+        """
         full = f"{_BOARD_TITLE} · {count}"
         # 各工具钮 22px + 分隔线/间距约 20 + 根面板边距，给标题留余量
         reserved = sum(b.width() for b in self._tool_buttons) + 34
-        avail = max(36, self._board_width() - reserved)
+        avail = self._board_width() - reserved
+        if avail < 48:
+            self._title.hide()
+            return
+        self._title.show()
         self._title.setText(
             self._title.fontMetrics().elidedText(full, Qt.ElideRight, avail))
 
@@ -1987,6 +2029,15 @@ class _BoardCard(QFrame):
         self.retheme()
         self._layout = lay
         self._power_btn = self._make_power_btn(power)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        """宽度可压缩到 0：卡片宽度由窗口列宽决定，不该反过来钳制窗口。
+
+        名称/副标题标签虽然是 Ignored 策略，但 QLabel 的 minimumSizeHint
+        仍是文字宽度，长副标题（如「卧室 | 21.8°C 67%」）会把卡片最小宽
+        撑大，单列时窗口就缩不回目标宽度。
+        """
+        return QSize(0, _CARD_HEIGHT)
 
     def _make_power_btn(self, power: bool | None):
         """电源钮在探测确认设备有可写开关属性后才创建并插入布局。

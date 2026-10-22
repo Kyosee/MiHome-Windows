@@ -889,7 +889,20 @@ assert not hasattr(board, "_bar_count"), "折叠横条仍残留计数 label"
 # 恢复展开态：后续用例按「展开 → 推送设备」的顺序继续
 board._expand()
 app.processEvents()
-print("15. 折叠宽度锚定 + 智能降级（点→聚合→宽条恢复）OK")
+
+# 单列与多列卡宽一致：从多列切单列后窗口必须缩回去，旧布局的
+# minimumSizeHint 会把它顶在旧宽度上（用户实测：要收起再展开才恢复）
+board.set_columns(2)
+app.processEvents()
+two_col_card = next(iter(board._cards.values())).width()
+board.set_columns(1)
+app.processEvents()
+one_col_card = next(iter(board._cards.values())).width()
+assert board.width() == board._board_width(), \
+    f"单列窗口被旧布局顶大: {board.width()} vs {board._board_width()}"
+assert abs(one_col_card - two_col_card) <= 2, \
+    f"单列卡片宽度与多列不一致: {one_col_card} vs {two_col_card}"
+print("15. 折叠宽度锚定 + 智能降级（点→聚合→宽条恢复）+ 单列宽度 OK")
 
 # ---------- 16. 启动时是收起态 → 展开必须重建卡片 ----------
 # 事故：上次退出时挂件收起，构造期只建了空网格；启动后主窗口在折叠态
