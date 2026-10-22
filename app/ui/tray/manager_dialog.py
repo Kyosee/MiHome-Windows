@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # MiHome-Windows: 米家设备的 Windows 桌面控制端
 # Copyright (C) 2026 MiHome-Windows contributors
-"""托盘项目管理对话框：设备/场景勾选加入 + 统一排序页拖拽排序。"""
+"""托盘项目管理对话框：设备/场景勾选加入 + 统一排序页拖拽排序。
+
+设备页可同时按关键字与房间筛选候选，房间选项带家庭名前缀；场景不属于
+任何房间，切到场景页时房间下拉收起，避免把场景整页藏空。
+"""
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QFont
@@ -21,6 +25,7 @@ import qtawesome as qta
 from app.core import settings_store, tray_store
 from app.core.models import DeviceInfo, SceneInfo
 from app.ui.overlay_dialog import OverlayDialog
+from app.ui.room_filter import make_room_combo, refresh_room_combo, room_key
 from app.ui.si_theme import (
     SiColors,
     check_toggle_qss,
@@ -123,7 +128,8 @@ class TrayManagerDialog(OverlayDialog):
             " font-size: 9pt; }"
             f"QLineEdit:focus {{ border-color: {SiColors.THEME}; }}")
         self._search.textChanged.connect(self._apply_filter)
-        lay.addWidget(self._search)
+        self._filter_row = self._make_filter_row()
+        lay.addWidget(self._filter_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -214,8 +220,15 @@ class TrayManagerDialog(OverlayDialog):
             row._did = dev.did  # type: ignore[attr-defined]
             # 搜索匹配用：设备名 + 房间名，大小写不敏感
             row._search_text = f"{dev.name} {dev.room_name}".lower()
+            # 房间筛选用：与下拉项的 item data 同一种键（家庭 + 房间）
+            row._room_key = room_key(dev)
             self._list_lay.addWidget(row)
         self._list_lay.addStretch(1)
+
+        # 房间下拉的选项来自实际设备：一台都没有房间归属时整块收起，
+        # 把整行宽度让给搜索框
+        self._has_room_options = refresh_room_combo(self._room_combo, all_devs)
+        self._room_combo.setVisible(self._has_room_options)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
@@ -301,7 +314,8 @@ class TrayManagerDialog(OverlayDialog):
         is_list = view == "list"
         self._tab_dev.setVisible(is_list)
         self._tab_scene.setVisible(is_list)
-        self._search.setVisible(is_list)
+        self._filter_row.setVisible(is_list)
+        self._sync_room_visibility()
         self._scroll.setVisible(is_list and self._tab_dev.isChecked())
         self._scene_scroll.setVisible(is_list and not self._tab_dev.isChecked())
         self._sort_scroll.setVisible(not is_list)
@@ -315,22 +329,52 @@ class TrayManagerDialog(OverlayDialog):
         self._apply_filter(self._search.text())
         self._update_subtitle()
 
-    def _apply_filter(self, text: str) -> None:
-        """按关键字隐藏不匹配的行（设备页与场景页共用，只隐藏不改勾选）。"""
-        keyword = (text or "").strip().lower()
+    def _make_filter_row(self) -> QWidget:
+        """搜索框 + 房间筛选下拉：两个条件取交集，都只隐藏行不动勾选。"""
+        self._room_combo = make_room_combo()
+        self._room_combo.currentIndexChanged.connect(
+            lambda _index: self._apply_filter(self._search.text()))
+        # 还没有设备清单，先按「没有可筛房间」处理
+        self._has_room_options = False
+        holder = QWidget()
+        holder.setStyleSheet("background: transparent;")
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(self._search, stretch=1)
+        row.addWidget(self._room_combo)
+        return holder
 
-        def _match(widget) -> bool:
-            if not keyword:
-                return True
-            return keyword in getattr(widget, "_search_text", "")
+    def _sync_room_visibility(self) -> None:
+        """房间下拉只对设备页生效：场景不属于任何房间，切过去就收起。"""
+        self._room_combo.setVisible(
+            self._has_room_options and self._view == "list"
+            and self._tab_dev.isChecked())
+
+    def _apply_filter(self, text: str) -> None:
+        """按关键字与房间隐藏不匹配的行（只隐藏，不改勾选状态）。
+
+        房间条件只在设备页生效：场景行没有房间归属，若切到场景页仍按
+        房间过滤，会把场景整页藏空。
+        """
+        keyword = (text or "").strip().lower()
+        room = self._room_combo.currentData()
+        on_device_page = self._view == "list" and self._tab_dev.isChecked()
+
+        def _match(widget, use_room: bool) -> bool:
+            if keyword and keyword not in getattr(widget, "_search_text", ""):
+                return False
+            if use_room and room is not None:
+                return getattr(widget, "_room_key", None) == room
+            return True
 
         for i in range(self._list_lay.count()):
             item = self._list_lay.itemAt(i)
             widget = item.widget() if item else None
             if widget is not None and getattr(widget, "_did", None):
-                widget.setVisible(_match(widget))
+                widget.setVisible(_match(widget, on_device_page))
         for _sid, row in self._scene_rows:
-            row.setVisible(_match(row))
+            row.setVisible(_match(row, False))
 
     def _update_subtitle(self) -> None:
         if self._view == "sort":
@@ -598,6 +642,7 @@ class TrayManagerDialog(OverlayDialog):
         self._update_subtitle()
         if not is_dev:
             self._ensure_scenes()
+        self._sync_room_visibility()
         # 场景行可能是切页后才建出来的，关键字要重新应用一遍
         self._apply_filter(self._search.text())
 

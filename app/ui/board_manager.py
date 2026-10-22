@@ -4,7 +4,8 @@
 """桌面挂件的管理对话框：勾选设备/场景 + 列数 / 透明度 / 背景色 / 置顶。
 
 设备与场景**分页展示**（与托盘管理一致）：设备页只列设备，场景页只列场景，
-不再混在一张长列表里靠标签区分。
+不再混在一张长列表里靠标签区分。设备页顶部按关键字与房间两个条件筛选，
+房间选项带家庭名前缀以区分不同家庭的同名房间。
 
 本窗只决定"挂件上放哪些"，**不提供排序**：顺序直接在挂件面板上按住卡片
 拖动调整。两个地方都能排序必然互相覆盖，留一个入口最不容易出错。
@@ -34,6 +35,12 @@ from PySide6.QtWidgets import (
 from app.core import board_store
 from app.core.models import DeviceInfo
 from app.ui.overlay_dialog import OverlayDialog
+from app.ui.room_filter import (
+    apply_room_combo_theme,
+    make_room_combo,
+    refresh_room_combo,
+    room_key,
+)
 from app.ui.si_theme import (
     SiColors,
     check_toggle_qss,
@@ -206,7 +213,17 @@ class BoardManagerDialog(OverlayDialog):
         self._search.setFixedHeight(28)
         self._search.setStyleSheet(self._search_qss())
         self._search.textChanged.connect(self._apply_device_filter)
-        box.addWidget(self._search)
+        # 搜索行右侧放房间下拉：两台名字相近的设备分属不同房间时，
+        # 光靠关键字还得从名字里认房间，按房间收窄比反复改关键字快
+        self._room_combo = make_room_combo()
+        self._room_combo.currentIndexChanged.connect(
+            lambda _index: self._apply_device_filter(self._search.text()))
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(8)
+        search_row.addWidget(self._search, stretch=1)
+        search_row.addWidget(self._room_combo)
+        box.addLayout(search_row)
 
         scroll, host = self._make_list_scroll()
         self._host = host
@@ -317,6 +334,10 @@ class BoardManagerDialog(OverlayDialog):
                           key=lambda d: (0 if d.online else 1, d.name)):
             self._add_row(dev, False)
         self._list_lay.addStretch(1)
+        # 房间下拉的选项来自实际设备：一台都没有房间归属时整块收起，
+        # 把整行宽度让给搜索框
+        has_rooms = refresh_room_combo(self._room_combo, devices)
+        self._room_combo.setVisible(has_rooms)
 
     def _fill_scene_rows(self) -> None:
         """填充场景页：已选（含快照）在前，其余可用场景按名排后。"""
@@ -387,6 +408,8 @@ class BoardManagerDialog(OverlayDialog):
         self._device_keys.append(dev.did)
         # 搜索匹配用：设备名 + 房间名，大小写不敏感
         row._search_text = f"{dev.name} {dev.room_name}".lower()
+        # 房间筛选用：与下拉项的 item data 同一种键（家庭 + 房间）
+        row._room_key = room_key(dev)
         # 已选但因离线只出现在列表里的设备，标出来免得以为它在线
         row._is_offline = not dev.online
         self._list_lay.addWidget(row)
@@ -419,20 +442,25 @@ class BoardManagerDialog(OverlayDialog):
         self._scene_list_lay.addWidget(row)
 
     def _apply_device_filter(self, text: str) -> None:
-        """设备页搜索：只隐藏行、不动勾选状态。"""
-        self._filter_rows(self._device_keys, text)
+        """设备页：关键字与房间两个条件取交集，只隐藏行、不动勾选状态。"""
+        self._filter_rows(self._device_keys, text, use_room=True)
 
     def _apply_scene_filter(self, text: str) -> None:
-        """场景页搜索：同样只隐藏行。"""
-        self._filter_rows(self._scene_keys, text)
+        """场景页搜索：同样只隐藏行；场景没有房间归属，不按房间过滤。"""
+        self._filter_rows(self._scene_keys, text, use_room=False)
 
-    def _filter_rows(self, keys: list[str], text: str) -> None:
+    def _filter_rows(self, keys: list[str], text: str,
+                     *, use_room: bool) -> None:
         keyword = (text or "").strip().lower()
+        room = self._room_combo.currentData() if use_room else None
         for key in keys:
             row = self._rows.get(key)
-            if row is not None:
-                row.setVisible(
-                    not keyword or keyword in getattr(row, "_search_text", ""))
+            if row is None:
+                continue
+            visible = not keyword or keyword in getattr(row, "_search_text", "")
+            if visible and room is not None:
+                visible = getattr(row, "_room_key", None) == room
+            row.setVisible(visible)
 
     # ---------- 列数与透明度 ----------
 
@@ -852,6 +880,8 @@ class BoardManagerDialog(OverlayDialog):
             self._reset_row_style(row)
         for edit in (self._search, self._scene_search):
             edit.setStyleSheet(self._search_qss())
+        # 房间下拉：配色与自绘箭头都要跟着换
+        apply_room_combo_theme(self._room_combo)
         for btn in self._checks.values():
             btn.setText("✓" if btn.isChecked() else "+")
             btn.setStyleSheet(check_toggle_qss(28))

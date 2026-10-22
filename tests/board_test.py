@@ -642,6 +642,104 @@ dlg3.done(0)
 app.processEvents()
 print("13. 搜索设备 + 离线设备灰名可见 OK")
 
+# ---------- 13b. 管理窗房间筛选下拉 ----------
+# 候选列表是全量设备、跨家庭混排，选项文字必须带家庭名：两个家庭各有
+# 一间「卧室」时只看房间名无从分辨是哪一间
+room_dlg = BoardManagerDialog(search_devs, None)
+room_labels = [room_dlg._room_combo.itemText(i)
+               for i in range(room_dlg._room_combo.count())]
+assert room_labels[0] == "全部房间", f"下拉首项应是全部房间: {room_labels}"
+assert set(room_labels[1:]) == {"家 · 客厅", "家 · 卧室", "家 · 次卧"}, \
+    f"房间选项不符: {room_labels}"
+assert not room_dlg._room_combo.isHidden(), "有房间归属的设备时下拉应显示"
+
+# 选「卧室」：只剩该房间的设备行，勾选状态一概不动
+checked_before = list(room_dlg.selected_dids())
+room_dlg._room_combo.setCurrentIndex(room_labels.index("家 · 卧室"))
+app.processEvents()
+in_bedroom = {devs[1].did, devs[3].did, devs[5].did}
+visible = {d for d, r in room_dlg._rows.items() if not r.isHidden()}
+assert visible == in_bedroom, f"按房间筛选未生效: {sorted(visible)}"
+assert list(room_dlg.selected_dids()) == checked_before, \
+    "房间筛选不该改动勾选状态"
+
+# 关键字与房间取交集：卧室 + 「设备1」只剩一台
+room_dlg._search.setText("设备1")
+app.processEvents()
+visible = {d for d, r in room_dlg._rows.items() if not r.isHidden()}
+assert visible == {devs[1].did}, f"房间与关键字未取交集: {sorted(visible)}"
+
+# 房间退回「全部房间」时关键字仍生效
+room_dlg._room_combo.setCurrentIndex(0)
+app.processEvents()
+visible = {d for d, r in room_dlg._rows.items() if not r.isHidden()}
+assert visible == {devs[1].did}, f"清房间后应回到纯关键字结果: {sorted(visible)}"
+room_dlg._search.setText("")
+app.processEvents()
+assert all(not r.isHidden() for r in room_dlg._rows.values()), \
+    "清空关键字后应恢复全部行"
+
+# 宽度贴当前选中项：选「全部房间」时不预留最长房间名的空白
+narrow = room_dlg._room_combo.width()
+room_dlg._room_combo.setCurrentIndex(room_labels.index("家 · 卧室"))
+app.processEvents()
+wide = room_dlg._room_combo.width()
+assert wide > narrow, f"下拉宽度未跟随选中项: {narrow} -> {wide}"
+room_dlg._room_combo.setCurrentIndex(0)
+app.processEvents()
+assert room_dlg._room_combo.width() == narrow, "退回全部房间后宽度应恢复"
+
+# 两个家庭各有一间「卧室」：必须是两个独立选项，筛选不能串到对方
+cross = [
+    DeviceInfo(did="c1", name="主卧灯", model="a.b.c", home_name="家庭1",
+               room_name="卧室", online=True),
+    DeviceInfo(did="c2", name="侧卧灯", model="a.b.c", home_name="家庭2",
+               room_name="卧室", online=True),
+]
+cross_dlg = BoardManagerDialog(cross, None)
+cross_labels = [cross_dlg._room_combo.itemText(i)
+                for i in range(cross_dlg._room_combo.count())]
+assert set(cross_labels[1:]) == {"家庭1 · 卧室", "家庭2 · 卧室"}, \
+    f"同名房间被合并成一项: {cross_labels}"
+cross_dlg._room_combo.setCurrentIndex(cross_labels.index("家庭2 · 卧室"))
+app.processEvents()
+visible = {d for d, r in cross_dlg._rows.items() if not r.isHidden()}
+assert visible == {"c2"}, f"同名房间筛选串到了另一个家庭: {sorted(visible)}"
+cross_dlg.done(0)
+
+# 场景没有房间归属：房间筛选不能把场景页藏空
+scene_only = [{"scene_id": "rs", "name": "回家", "home_id": "h", "home_name": "家"}]
+scene_dlg = BoardManagerDialog(search_devs, None, scenes=scene_only)
+scene_dlg._room_combo.setCurrentIndex(1)      # 任一具体房间
+scene_dlg._apply_scene_filter("")
+assert not scene_dlg._rows["scene:rs"].isHidden(), "房间筛选把场景行也藏掉了"
+scene_dlg.done(0)
+
+# 全部设备都没有房间归属时没有可选项，下拉整块收起
+no_room = [DeviceInfo(did="nr", name="手表", model="a.b.c",
+                      home_name="未知", room_name="未知", online=True)]
+nr_dlg = BoardManagerDialog(no_room, None)
+assert nr_dlg._room_combo.count() == 1 and nr_dlg._room_combo.isHidden(), \
+    "没有房间可筛时下拉应隐藏"
+nr_dlg.done(0)
+room_dlg.done(0)
+app.processEvents()
+
+# 设备清单刷新后：已选房间还在就保留，房间消失则退回「全部房间」
+from app.ui import room_filter as _room_filter
+
+combo = _room_filter.make_room_combo()
+_room_filter.refresh_room_combo(combo, search_devs)
+_bedroom_idx = next(i for i in range(combo.count())
+                    if combo.itemData(i) == ("家", "卧室"))
+combo.setCurrentIndex(_bedroom_idx)
+_room_filter.refresh_room_combo(combo, search_devs)
+assert combo.currentData() == ("家", "卧室"), "刷新后应保留已选房间"
+_room_filter.refresh_room_combo(combo, devs[::2])   # 只剩客厅设备
+assert combo.currentData() is None and combo.count() == 2, \
+    "房间消失后应退回全部房间"
+print("13b. 管理窗房间筛选（选项 / 交集 / 场景不受影响 / 无房间隐藏 / 刷新保留）OK")
+
 # ---------- 14. 连点「+」只能开一个管理窗 ----------
 import app.ui.main_window as _mw
 
@@ -1092,6 +1190,39 @@ assert len(_visible_rows(tm)) == total, "清空搜索后应恢复全部行"
 tm.reject()
 app.processEvents()
 print("25. 托盘管理搜索框 OK")
+
+# ---------- 25b. 托盘管理窗房间筛选 ----------
+tm2 = TrayManagerDialog(search_devs, None, scenes=[])
+tm2.show()
+app.processEvents()
+tray_labels = [tm2._room_combo.itemText(i)
+               for i in range(tm2._room_combo.count())]
+assert tray_labels[0] == "全部房间", f"下拉首项应是全部房间: {tray_labels}"
+assert set(tray_labels[1:]) == {"家 · 客厅", "家 · 卧室", "家 · 次卧"}, \
+    f"托盘房间选项不符: {tray_labels}"
+
+tm2._room_combo.setCurrentIndex(tray_labels.index("家 · 卧室"))
+app.processEvents()
+assert set(_visible_rows(tm2)) == {devs[1].did, devs[3].did, devs[5].did}, \
+    f"托盘按房间筛选未生效: {_visible_rows(tm2)}"
+
+# 筛选只是视图：被房间藏起来的已勾选设备不能从保存结果里消失
+tm2._checks[devs[0].did].setChecked(True)
+saved_dids = [it["id"] for it in tm2.selected_order() if it["type"] == "device"]
+assert devs[0].did in saved_dids, "被房间筛掉的设备不该从保存结果里消失"
+tm2._checks[devs[0].did].setChecked(False)
+
+# 房间下拉只属于设备页：场景页与排序页都收起
+tm2._switch_tab(1)
+assert tm2._room_combo.isHidden(), "场景页应收起房间下拉"
+tm2._switch_tab(0)
+assert not tm2._room_combo.isHidden(), "回到设备页下拉应恢复"
+tm2._switch_view("sort")
+assert tm2._filter_row.isHidden(), "排序页不应显示搜索行"
+tm2._switch_view("list")
+tm2.reject()
+app.processEvents()
+print("25b. 托盘管理窗房间筛选（选项 / 筛选 / 保存不受影响 / 场景页收起）OK")
 
 # ---------- 26. 单排挂件：底部不留空行、不出滚动条 ----------
 board_store.set_locked(True)
