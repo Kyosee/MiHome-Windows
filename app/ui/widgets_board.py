@@ -18,7 +18,17 @@
 房间/温湿度副标题 + 圆形电源钮；点击卡片本体打开完整详情面板。
 """
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QPropertyAnimation,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QFrame,
@@ -51,6 +61,8 @@ _CARD_MIN_WIDTH = 148
 _CARD_MIN_WIDTH_SINGLE = 128
 _CARD_HEIGHT = 56
 _COLLAPSE_HEIGHT = 32
+# 悬停恢复不透明 / 移开回落的过渡时长：太短像瞬变，太长显得拖沓
+_OPACITY_FADE_MS = 180
 _MARGIN = 10          # 根面板左右留白
 # 底部留白单独给一个更小的值：卡片本身就带圆角与边框，底边再留 10px
 # 会在单排时变成一条"空行"（用户实测截图反馈），6px 与行间距 6px 对齐
@@ -68,6 +80,13 @@ _DOT_STEPS = ((9, 5), (7, 4), (5, 3))
 _BAR_FIXED_W = 20 + 10 + 22
 # 横条里放得下标题的最小宽度（窄了先把标题让给状态区）
 _BAR_TITLE_MIN_W = 300
+
+# SetWindowPos 的 hWndInsertAfter 与标志位：挂件按置顶开关归位层级时用
+_HWND_TOPMOST = -1
+_HWND_BOTTOM = 1
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOACTIVATE = 0x0010
 
 # 挂件自称：桌面上只有这一块面板，标题要让人一眼知道它是谁家的
 # 换产品名只改这两行即可
@@ -410,8 +429,10 @@ class WidgetsBoard(QWidget):
 
         self._title = QLabel(_BOARD_TITLE)
         self._title.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.DemiBold))
-        # 宽度可压缩：窄挂件（单排 1 张，148px）放不下全名，由 _update_title 省略
-        self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # 宽度按省略后的文本走：Ignored 会被布局压成 0 宽，标题直接看不见；
+        # 窄挂件（单排 1 张）放不下全名时由 _update_title 先省略
+        self._title.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self._title.setStyleSheet(
             f"color: {self._palette.text_secondary}; background: transparent;")
         self._title.setToolTip(f"{_BOARD_TITLE}（单击收起为细横条，拖动可移动）")
@@ -425,6 +446,10 @@ class WidgetsBoard(QWidget):
             "mdi.lock", "锁定",
             lambda: self.set_locked(True))
         hl.addWidget(self._lock_toggle)
+        # 置顶：图钉开关，选中时主题色底；与锁定并排成"状态开关"组
+        self._pin_toggle = self._make_tool_button(
+            "mdi.pin-outline", "置顶", self._toggle_topmost)
+        hl.addWidget(self._pin_toggle)
         self._tool_divider = QFrame(self._handle)
         self._tool_divider.setFixedSize(1, 14)
         hl.addSpacing(2)
@@ -496,10 +521,11 @@ class WidgetsBoard(QWidget):
         self._bar_grip.setToolTip("拖动可移动位置，单击展开")
         bar_lay.addWidget(self._bar_grip)
         # 折叠态标题：只剩一条细横条时，光有状态点看不出这是谁家的挂件。
-        # 宽度可压缩：窄挂件（单排 1 张）下横条不能把窗口最小宽度顶大，
-        # 放不下时由 _dot_plan 自动隐藏标题、只留状态点
+        # 用 Preferred 而不是 Ignored：Ignored 会被布局压成 0 宽，即使
+        # _dot_plan 算出来放得下也看不见；空间不够时由 _dot_plan 主动隐藏
         self._bar_title = QLabel(_BAR_TITLE)
-        self._bar_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._bar_title.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self._bar_title.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
         self._bar_title.setStyleSheet(
             f"color: {self._palette.text_secondary}; background: transparent; font-size: 8pt;")
@@ -673,10 +699,18 @@ class WidgetsBoard(QWidget):
         return self._bg
 
     def _window_flags(self):
-        """窗口标志：无边框 + Tool（不占任务栏），置顶按开关决定。"""
+        """窗口标志：无边框 + Tool（不占任务栏），置顶按开关决定。
+
+        非置顶时额外禁止窗口接受焦点：挂件是贴在桌面上的常驻面板，
+        点一下只该响应这次点击，不该把焦点从用户正在用的窗口抢走。
+        真正把它压在其它窗口之下由 _apply_z_order 完成（Qt 的
+        WindowStaysOnBottomHint 在 Windows 上不生效）。
+        """
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if self._topmost:
             flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags |= Qt.WindowType.WindowDoesNotAcceptFocus
         return flags
 
     def set_topmost(self, topmost: bool, *, persist: bool = True) -> None:
@@ -690,11 +724,37 @@ class WidgetsBoard(QWidget):
         if topmost == self._topmost:
             if persist:
                 board_store.set_topmost(topmost)
+            self._refresh_pin_toggle()
             return
         self._topmost = topmost
         if persist:
             board_store.set_topmost(topmost)
         self._apply_window_flags()
+        self._refresh_pin_toggle()
+
+    def _toggle_topmost(self) -> None:
+        """标题栏图钉：一键切换置顶。"""
+        self.set_topmost(not self._topmost)
+
+    def _refresh_pin_toggle(self) -> None:
+        """图钉按钮跟随置顶状态：选中时主题色底 + 实心钉，取消后恢复普通按钮。"""
+        btn = getattr(self, "_pin_toggle", None)
+        if btn is None:
+            return
+        if self._topmost:
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {SiColors.THEME}; border: none;"
+                " border-radius: 11px; }"
+                f"QPushButton:hover {{ background: {SiColors.THEME_CHECKED_HOVER}; }}")
+            btn.setIcon(qta.icon("mdi.pin", color=SiColors.ON_THEME_TEXT))
+            btn.setToolTip("取消置顶")
+            btn._icon_name = "mdi.pin"
+        else:
+            btn.setStyleSheet(_board_btn_qss(self._palette))
+            btn.setIcon(qta.icon("mdi.pin-outline",
+                                 color=self._palette.text_primary))
+            btn.setToolTip("置顶")
+            btn._icon_name = "mdi.pin-outline"
 
     def _apply_window_flags(self) -> None:
         visible = self.isVisible()
@@ -709,9 +769,51 @@ class WidgetsBoard(QWidget):
             if not self._collapsed:
                 self._apply_expanded_geometry()
             self._apply_opacity()
+            # show 之后系统会把窗口摆到最前，等这一轮事件处理完再按
+            # 置顶开关归位（非置顶要压回最底层）
+            QTimer.singleShot(0, self._apply_z_order)
 
     def is_topmost(self) -> bool:
         return self._topmost
+
+    def _apply_z_order(self) -> None:
+        """按置顶开关把窗口放到最顶层或最底层。
+
+        Qt 的 WindowStaysOnBottomHint 在 Windows 上不生效：非置顶的挂件
+        一旦被点击或重新 show 就会浮到其它窗口之上，把用户正在用的程序
+        盖住。这里直接调 SetWindowPos 控制 z-order，HWND_BOTTOM 表示压在
+        所有普通窗口之下（仍在桌面之上），HWND_TOPMOST 表示置顶。
+        """
+        import shiboken6
+
+        # 延时调用（showEvent 后的单次定时器）可能落在窗口已销毁之后
+        if not shiboken6.isValid(self) or not self.isVisible():
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND, wintypes.HWND,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            # 64 位下 hWndInsertAfter 必须按指针传，-1/1 直接传会截断
+            insert_after = wintypes.HWND(
+                _HWND_TOPMOST if self._topmost else _HWND_BOTTOM)
+            user32.SetWindowPos(
+                wintypes.HWND(int(self.winId())), insert_after,
+                0, 0, 0, 0,
+                _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)
+        except Exception:
+            # 非 Windows 或原生窗口尚未就绪：退化成普通窗口的层级行为
+            pass
+
+    def apply_z_order(self) -> None:
+        """按当前置顶状态立即归位（主窗口显示挂件后调用）。"""
+        self._apply_z_order()
 
     def _apply_styles(self) -> None:
         """按当前配色表重设所有内联样式（主题切换与改背景色共用）。"""
@@ -772,13 +874,48 @@ class WidgetsBoard(QWidget):
                     card.retheme()
         if self._collapsed:
             self._sync_dots()
+        # 图钉的选中态由置顶开关决定：统一按钮样式之后再单独覆盖
+        self._refresh_pin_toggle()
 
-    def _apply_opacity(self) -> None:
+    def _apply_opacity(self, *, animate: bool = False) -> None:
+        """按「悬停恢复」状态设置窗口透明度。
+
+        animate=True 只给鼠标进出用：从 30% 瞬间跳到 100% 太突兀，用一段
+        短过渡；拖动透明度滑块、切换置顶重建窗口等场景必须即时，否则
+        滑块跟手性会被动画拖慢。
+        """
         # 管理对话框打开时预览透明度：暂停「悬停恢复不透明」，
         # 否则鼠标移到对话框上经过挂件会把预览值顶回 1.0
         previewing = self.property("previewing")
         opaque = self._force_opaque and not previewing
-        self.setWindowOpacity(1.0 if opaque else self._opacity)
+        target = 1.0 if opaque else self._opacity
+        if not animate or not self.isVisible():
+            self._stop_opacity_anim()
+            self.setWindowOpacity(target)
+            return
+        self._animate_window_opacity(target)
+
+    def _stop_opacity_anim(self) -> None:
+        anim = getattr(self, "_opacity_anim", None)
+        if anim is not None:
+            anim.stop()
+
+    def _animate_window_opacity(self, target: float) -> None:
+        """悬停恢复/移开回落：从当前值短动画过渡到目标值。"""
+        current = self.windowOpacity()
+        if abs(current - target) < 0.005:
+            self._stop_opacity_anim()
+            return
+        anim = getattr(self, "_opacity_anim", None)
+        if anim is None:
+            anim = QPropertyAnimation(self, b"windowOpacity", self)
+            anim.setDuration(_OPACITY_FADE_MS)
+            anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+            self._opacity_anim = anim
+        anim.stop()
+        anim.setStartValue(current)
+        anim.setEndValue(target)
+        anim.start()
 
     def set_opacity(self, value: float, *, persist: bool = True) -> None:
         """设定透明度；persist=True 时同步落盘（滑块拖动过程每步都落盘）。"""
@@ -798,13 +935,13 @@ class WidgetsBoard(QWidget):
     def enterEvent(self, event) -> None:  # noqa: N802
         # 鼠标进入即恢复不透明：半透明时文字难读、看不清开关状态
         self._force_opaque = True
-        self._apply_opacity()
+        self._apply_opacity(animate=True)
         self._refresh_lock_btn()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._force_opaque = False
-        self._apply_opacity()
+        self._apply_opacity(animate=True)
         btn = getattr(self, "_lock_btn", None)
         if btn is not None:
             btn.hide()
@@ -1182,12 +1319,19 @@ class WidgetsBoard(QWidget):
         return max(0, self.width() - _BAR_FIXED_W - spaces - title_w)
 
     def _dot_plan(self, count: int):
-        """挑一套排布：(点径, 间距, 是否保留标题)；None 表示该走聚合条。"""
+        """挑一套排布：(点径, 间距, 是否保留标题)；None 表示该走聚合条。
+
+        先把所有点径按"能保留标题"筛一遍取最大档，全都放不下才退到
+        无标题方案。不能逐级"先试带标题再试不带"——第一档无标题刚好
+        放得下就返回的话，更小点径 + 标题的方案永远轮不到，标题白白
+        被牺牲（16 台设备时就是这样：9px 无标题塞得下，5px + 标题也塞得下）。
+        """
         for dot, gap in _DOT_STEPS:
             need = count * (dot + gap) - gap
-            # 优先保留标题（能认出这是谁家的挂件），其次才牺牲标题保尺寸
             if need <= self._dots_area_width(title=True):
                 return dot, gap, True
+        for dot, gap in _DOT_STEPS:
+            need = count * (dot + gap) - gap
             if need <= self._dots_area_width(title=False):
                 return dot, gap, False
         return None
@@ -1282,23 +1426,13 @@ class WidgetsBoard(QWidget):
             self._relayout_bar()
             return
 
-        # 聚合模式：比例段 + 计数
+        # 聚合模式：比例段（逐台明细在 tooltip 里）
         self._bar_title.setVisible(self.width() >= _BAR_TITLE_MIN_W)
         self._dot_lay.setSpacing(6)
         bar = _AggregateBar(self._dot_host)
         bar.set_states([(state, online) for _dev, state, online in items],
                        self._palette)
         self._dot_lay.addWidget(bar, stretch=1)
-        on = sum(1 for _dev, state, online in items if online and state is True)
-        count = QLabel(f"{on}/{len(items)} 开")
-        # 计数文字可压缩：窄挂件（单排 1 张）下横条不能把窗口最小宽度顶大，
-        # 极窄时文字被裁掉的部分在 tooltip 里仍能看到
-        count.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        count.setStyleSheet(
-            f"color: {self._palette.text_secondary}; background: transparent;"
-            " font-size: 8pt;")
-        count.setToolTip("已开 / 总台数；逐台明细见横条悬停提示")
-        self._dot_lay.addWidget(count)
         self._relayout_bar()
 
     # ---------- 数据 ----------
@@ -1350,6 +1484,16 @@ class WidgetsBoard(QWidget):
         super().showEvent(event)
         # 显示时把隐藏期间累积的读数补回卡片
         self._refresh_subtitles()
+        # show 之后窗口默认落在最前，等这一轮事件处理完再按置顶开关归位
+        QTimer.singleShot(0, self._apply_z_order)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        # 非置顶时窗口被激活（用户点了挂件）会被系统提到前面，立刻压回
+        # 底层；置顶时 WindowStaysOnTopHint 已经保证层级，不需要处理
+        if (event.type() == QEvent.Type.ActivationChange
+                and self.isActiveWindow() and not self._topmost):
+            QTimer.singleShot(0, self._apply_z_order)
 
     def tracked_dids(self) -> list[str]:
         """挂件上放着的设备 did（不含场景），供主窗口纳入轮询。"""
@@ -1488,7 +1632,7 @@ class WidgetsBoard(QWidget):
     def _update_title(self, count: int) -> None:
         """标题 = 产品名 + 数量，按窗口宽度省略（窄挂件放不下全名）。"""
         full = f"{_BOARD_TITLE} · {count}"
-        # 4 个工具钮 22px + 分隔线/间距约 20 + 根面板边距，给标题留余量
+        # 各工具钮 22px + 分隔线/间距约 20 + 根面板边距，给标题留余量
         reserved = sum(b.width() for b in self._tool_buttons) + 34
         avail = max(36, self._board_width() - reserved)
         self._title.setText(

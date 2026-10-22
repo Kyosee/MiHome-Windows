@@ -275,6 +275,10 @@ class MainWindow(QMainWindow):
         self._board_manage_action = QAction("管理桌面挂件", self._more_menu)
         self._board_manage_action.triggered.connect(self.show_board_manager)
         self._more_menu.addAction(self._board_manage_action)
+        # 显隐入口紧跟管理项，同样只在挂件开关开启时出现
+        self._board_toggle_action = QAction("隐藏桌面挂件", self._more_menu)
+        self._board_toggle_action.triggered.connect(self.toggle_board_visible)
+        self._more_menu.addAction(self._board_toggle_action)
         self._more_menu.addAction("设置").triggered.connect(self.show_settings)
         # 「关于」固定在菜单最底部
         self._more_menu.addSeparator()
@@ -636,22 +640,31 @@ class MainWindow(QMainWindow):
         from app.core import board_store
 
         enabled = board_store.get_enabled()
+        if self._board is not None:
+            if enabled:
+                self.show_board()
+            else:
+                self.hide_board()
+        # 显隐状态定下来后再同步菜单：显隐项的文案依赖挂件当前是否可见
         self._refresh_board_menu_items()
-        if self._board is None:
-            return
-        if enabled:
-            self.show_board()
-        else:
-            self.hide_board()
+
+    def _board_visible(self) -> bool:
+        return self._board is not None and self._board.isVisible()
 
     def _refresh_board_menu_items(self) -> None:
-        """挂件关闭时隐藏「管理桌面挂件」入口（主界面与托盘共用）。"""
+        """同步挂件菜单入口：开关关闭时全部隐藏，显隐项按当前状态取名。"""
         from app.core import board_store
 
         enabled = board_store.get_enabled()
         action = getattr(self, "_board_manage_action", None)
         if action is not None:
             action.setVisible(enabled)
+        toggle = getattr(self, "_board_toggle_action", None)
+        if toggle is not None:
+            # 挂件构造失败时显隐项没有意义（管理入口仍保留，它只依赖设备清单）
+            toggle.setVisible(enabled and self._board is not None)
+            toggle.setText(
+                "隐藏桌面挂件" if self._board_visible() else "显示桌面挂件")
         if self._tray is not None:
             self._tray.set_board_enabled(enabled)
 
@@ -983,15 +996,30 @@ class MainWindow(QMainWindow):
         if self._board is None:
             return
         self._board.set_devices(self._all_devices, self._known_power)
-        was_visible = self._board.isVisible()
         self._board.show()
-        if not was_visible:
-            self._board.raise_()
+        # 非置顶时 raise_ 会把挂件顶到所有窗口之上（它只是桌面挂件，
+        # 不该盖住用户正在用的程序），改成按开关归位
+        self._board.apply_z_order()
 
     def hide_board(self) -> None:
-        """隐藏挂件（关闭设置开关时调用）。"""
+        """隐藏挂件（关闭设置开关 / 菜单里手动隐藏时调用）。"""
         if self._board is not None:
             self._board.hide()
+
+    def toggle_board_visible(self) -> None:
+        """显示或隐藏桌面挂件（主界面与托盘菜单共用）。
+
+        只切换本次显隐，不改「桌面挂件」开关：开关仍开着，重启后
+        挂件照常出现。
+        """
+        if self._board is None:
+            return
+        if self._board.isVisible():
+            self.hide_board()
+        else:
+            self.show_board()
+        # 显隐项文案依赖挂件当前是否可见，切换后立即同步两处菜单
+        self._refresh_board_menu_items()
 
     def toggle_board_collapse(self) -> None:
         """折叠/展开挂件（挂件自身与托盘菜单共用）。"""

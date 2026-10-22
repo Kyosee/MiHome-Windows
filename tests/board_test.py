@@ -147,6 +147,20 @@ print("3. 列数重排 OK")
 # ---------- 4. 透明度实时预览 + 悬停恢复 ----------
 # windowOpacity 由平台按 1/255 量化，断言用 _OPACITY_TOL 而非浮点精确值
 _OPACITY_TOL = 1.0 / 255.0 + 1e-6
+
+
+def _wait_opacity(widget, target: float, timeout: float = 2.0) -> None:
+    """等透明度动画跑到目标值：悬停恢复/移开回落是 180ms 的淡入淡出。"""
+    import time as _time
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        app.processEvents()
+        if abs(widget.windowOpacity() - target) < _OPACITY_TOL:
+            return
+        _time.sleep(0.01)
+
+
 board.set_opacity(0.45)
 app.processEvents()
 assert abs(board.windowOpacity() - 0.45) < _OPACITY_TOL, \
@@ -159,14 +173,17 @@ board.set_opacity(0.45)
 enter = QMouseEvent(QEvent.Type.Enter, QPoint(5, 5), Qt.MouseButton.NoButton,
                    Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
 app.sendEvent(board, enter)
+_wait_opacity(board, 1.0)
 assert abs(board.windowOpacity() - 1.0) < _OPACITY_TOL, "悬停未恢复不透明"
 leave = QMouseEvent(QEvent.Type.Leave, QPoint(5, 5), Qt.MouseButton.NoButton,
                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
 app.sendEvent(board, leave)
+_wait_opacity(board, 0.45)
 assert abs(board.windowOpacity() - 0.45) < _OPACITY_TOL, "移开后未恢复设定透明度"
 # 预览期间（管理对话框打开）不强制不透明，否则预览值被顶回 1.0
 board.setProperty("previewing", True)
 app.sendEvent(board, enter)
+_wait_opacity(board, 0.45)
 assert abs(board.windowOpacity() - 0.45) < _OPACITY_TOL, "预览期间被悬停恢复顶回"
 board.setProperty("previewing", False)
 app.processEvents()
@@ -541,6 +558,11 @@ assert board_store.get_topmost() is False, "置顶应默认关闭"
 assert win._board.is_topmost() is False
 assert not (win._board.windowFlags() & _Qt.WindowType.WindowStaysOnTopHint), \
     "默认不置顶时窗口标志里不应出现 WindowStaysOnTopHint"
+# 非置顶的桌面挂件不允许抢焦点：点一下只响应点击，不把用户正在用的窗口顶走
+assert (win._board.windowFlags() & _Qt.WindowType.WindowDoesNotAcceptFocus), \
+    "非置顶时应禁止挂件接受焦点"
+# 层级归位走原生 SetWindowPos；离屏环境也不该抛异常
+win._board.apply_z_order()
 
 # 预览路径只改真实窗口、不落盘（落盘由管理对话框负责，与透明度同一约定）
 win._on_board_topmost_preview(True)
@@ -548,6 +570,8 @@ app.processEvents()
 assert win._board.is_topmost() is True
 assert win._board.windowFlags() & _Qt.WindowType.WindowStaysOnTopHint, \
     "开启置顶后窗口标志未带上 WindowStaysOnTopHint"
+assert not (win._board.windowFlags() & _Qt.WindowType.WindowDoesNotAcceptFocus), \
+    "置顶时不需要禁止焦点"
 assert board_store.get_topmost() is False, "预览路径不应落盘"
 
 # 带落盘的路径（挂件自身 API / 对话框）才写 board.json
@@ -558,11 +582,26 @@ app.processEvents()
 assert board_store.get_topmost() is False
 assert not (win._board.windowFlags() & _Qt.WindowType.WindowStaysOnTopHint), \
     "关闭置顶后窗口标志未清除"
+assert (win._board.windowFlags() & _Qt.WindowType.WindowDoesNotAcceptFocus), \
+    "关闭置顶后应恢复禁止焦点"
 # 改窗口标志会重建原生窗口，几何必须还原（否则挂件跳回屏幕左上角）
 geo = win._board.geometry()
 assert geo.width() > 0 and geo.height() > 0, "切换置顶后窗口尺寸丢失"
 assert win._board.isVisible(), "切换置顶后窗口被隐藏了（需重新 show）"
-print("11. 置顶开关（默认关 / 可开可关 / 几何与显示不丢）OK")
+
+# 标题栏图钉：一键切换置顶，选中态用主题色底
+assert hasattr(win._board, "_pin_toggle"), "标题栏缺少置顶图钉按钮"
+win._board._pin_toggle.click()
+app.processEvents()
+assert win._board.is_topmost() is True, "点图钉未开启置顶"
+assert SiColors.THEME in win._board._pin_toggle.styleSheet(), \
+    f"置顶时图钉未用主题色底: {win._board._pin_toggle.styleSheet()}"
+win._board._pin_toggle.click()
+app.processEvents()
+assert win._board.is_topmost() is False, "再点图钉未取消置顶"
+assert SiColors.THEME not in win._board._pin_toggle.styleSheet(), \
+    "取消置顶后图钉仍是主题色底"
+print("11. 置顶开关（默认关 / 可开可关 / 几何与显示不丢 / 图钉切换）OK")
 
 # ---------- 12. 管理对话框：背景色与置顶的预览信号 ----------
 board_store.set_bg(None)
@@ -591,6 +630,12 @@ assert dlg2._bg_hint.text() == "#123456", "提示未显示自定义色号"
 dlg2._bg_chips[0].click()
 assert board_store.get_bg() is None
 assert bg_events[-1] is None, "恢复跟随主题应发出 None"
+# 两个勾选框用自绘样式：选中时画主题色方块 + 对勾，不只是填色
+from app.ui.board_manager import _CheckBox
+
+assert isinstance(dlg2._topmost_check, _CheckBox), "置顶勾选框未用自绘样式"
+assert isinstance(dlg2._lock_check, _CheckBox), "锁定勾选框未用自绘样式"
+assert dlg2._topmost_check.sizeHint().width() > 20, "勾选框宽度异常"
 # 置顶勾选框
 dlg2._topmost_check.setChecked(True)
 assert board_store.get_topmost() is True
@@ -800,9 +845,6 @@ assert one_col < 200, f"1 列宽度异常（卡片变宽了？）: {one_col}"
 assert board.width() == max(one_col, board._bar.minimumSizeHint().width()), \
     f"折叠横条宽度未锚定展开宽度: {board.width()} vs {max(one_col, board._bar.minimumSizeHint().width())}"
 assert _has_aggregate(board), f"20 台设备在 {one_col}px 里应降级为聚合状态条"
-counts = [w.text() for w in _dot_widgets(board)
-          if isinstance(w, QLabel) and w.text().endswith(" 开")]
-assert counts and counts[0].endswith("/20 开"), f"聚合模式缺计数: {counts}"
 assert "设备0" in board._bar.toolTip(), "聚合模式应在 tooltip 里给出逐台明细"
 assert board._bar_title.isHidden(), "窄横条下标题应隐藏，把位置让给状态"
 
@@ -831,6 +873,22 @@ assert not _has_aggregate(board), f"{six_col}px 宽度下 20 台应能用逐台�
 board._expand()
 app.processEvents()
 assert not board.collapsed and board.width() == six_col
+
+# 逐台点模式也必须保留标题和计数：设备多时标题曾被挤掉，横条上
+# 看不出这是谁家的挂件、也看不到台数
+board_store.set_columns(2)
+board.set_columns(2)
+board.set_devices(many[:16], {k: v for k, v in many_power.items()
+                             if k in {d.did for d in many[:16]}})
+board._collapse()
+app.processEvents()
+assert not _has_aggregate(board), "2 列 16 台应仍是逐台状态点"
+assert not board._bar_title.isHidden(), "逐台点模式把标题挤掉了"
+# 横条上不再显示「n/m 开」计数
+assert not hasattr(board, "_bar_count"), "折叠横条仍残留计数 label"
+# 恢复展开态：后续用例按「展开 → 推送设备」的顺序继续
+board._expand()
+app.processEvents()
 print("15. 折叠宽度锚定 + 智能降级（点→聚合→宽条恢复）OK")
 
 # ---------- 16. 启动时是收起态 → 展开必须重建卡片 ----------
@@ -1038,31 +1096,56 @@ app.processEvents()
 assert not hint.isVisible(), "提示应在收起后隐藏"
 print("20. 自绘悬浮提示（不透明 + 主题配色）OK")
 
-# ---------- 21. 「管理桌面挂件」入口只在开关开启时出现 ----------
+# ---------- 21. 「管理 / 显隐桌面挂件」入口只在开关开启时出现 ----------
 board_store.set_enabled(False)
 win._apply_board_enabled()
 app.processEvents()
 assert not win._board_manage_action.isVisible(), "开关关闭时主菜单仍显示管理入口"
+assert not win._board_toggle_action.isVisible(), "开关关闭时主菜单仍显示显隐入口"
 if win._tray is not None:
     assert not win._tray._board_manage_action.isVisible(), \
         "开关关闭时托盘菜单仍显示管理入口"
+    assert not win._tray._board_toggle_action.isVisible(), \
+        "开关关闭时托盘菜单仍显示显隐入口"
 board_store.set_enabled(True)
 win._apply_board_enabled()
 app.processEvents()
 assert win._board_manage_action.isVisible(), "开关开启后主菜单应显示管理入口"
-# 主菜单：旧的「桌面挂件」随手开关已删除
+assert win._board_toggle_action.isVisible(), "开关开启后主菜单应显示显隐入口"
+assert win._board_toggle_action.text() == "隐藏桌面挂件", \
+    f"挂件可见时主菜单文案应为隐藏: {win._board_toggle_action.text()}"
+# 主菜单：旧的「桌面挂件」随手开关已删除（精确同名项不应存在）
 more_texts = [a.text() for a in win._more_menu.actions() if a.text()]
 assert "桌面挂件" not in more_texts, f"主菜单仍残留「桌面挂件」: {more_texts}"
 assert "管理桌面挂件" in more_texts
+assert "隐藏桌面挂件" in more_texts
 if win._tray is not None:
     tray_texts = [a.text() for a in win._tray._tray.contextMenu().actions()
                   if a.text()]
-    assert "隐藏桌面挂件" not in tray_texts, f"托盘菜单仍残留隐藏项: {tray_texts}"
     assert "锁定桌面挂件" not in tray_texts, f"托盘菜单仍残留锁定项: {tray_texts}"
     assert "管理桌面挂件" in tray_texts
-    assert (tray_texts.index("管理桌面挂件")
-            < tray_texts.index("定时任务")), f"管理入口应排在定时任务之前: {tray_texts}"
-print("21. 挂件菜单入口随开关显隐 OK")
+    toggle_text = win._board_toggle_action.text()
+    assert toggle_text in tray_texts, f"托盘菜单缺少显隐项: {tray_texts}"
+    assert (tray_texts.index("管理桌面挂件") < tray_texts.index(toggle_text)
+            < tray_texts.index("定时任务")), \
+        f"显隐入口应紧跟管理项、排在定时任务之前: {tray_texts}"
+
+# 点托盘显隐项：挂件隐藏，两处文案同步变为「显示桌面挂件」
+win._tray._toggle_board_visible()
+app.processEvents()
+assert not win._board.isVisible(), "点「隐藏桌面挂件」后挂件仍可见"
+assert win._board_toggle_action.text() == "显示桌面挂件", \
+    f"隐藏后主菜单文案未更新: {win._board_toggle_action.text()}"
+win._refresh_board_menu_items()
+assert win._tray._board_toggle_action.text() == "显示桌面挂件", \
+    f"隐藏后托盘菜单文案未更新: {win._tray._board_toggle_action.text()}"
+# 再点一次恢复显示，且不改动「桌面挂件」开关
+win._tray._toggle_board_visible()
+app.processEvents()
+assert win._board.isVisible(), "点「显示桌面挂件」后挂件未恢复"
+assert board_store.get_enabled() is True, "显隐切换不应改动挂件开关"
+assert win._board_toggle_action.text() == "隐藏桌面挂件"
+print("21. 挂件管理/显隐入口随开关显隐 + 文案切换 OK")
 
 # ---------- 22. 落盘位置在屏幕外 → 拉回可见区 ----------
 screen = QApplication.primaryScreen().availableGeometry()

@@ -43,13 +43,18 @@ class TrayController:
         act_manage = QAction("管理托盘项目", menu)
         act_manage.triggered.connect(self._emit_manage)
         menu.addAction(act_manage)
-        # 桌面挂件：只有「管理」一个入口（开关在设置里）。放在定时任务之上，
+        # 桌面挂件：管理 + 显隐两个入口（开关在设置里）。放在定时任务之上，
         # 与主界面「更多」菜单的顺序保持一致
         act_board_manage = QAction("管理桌面挂件", menu)
         act_board_manage.triggered.connect(self._on_manage_board)
         act_board_manage.setVisible(False)
         menu.addAction(act_board_manage)
         self._board_manage_action = act_board_manage
+        act_board_toggle = QAction("隐藏桌面挂件", menu)
+        act_board_toggle.triggered.connect(self._toggle_board_visible)
+        act_board_toggle.setVisible(False)
+        menu.addAction(act_board_toggle)
+        self._board_toggle_action = act_board_toggle
         act_schedule = QAction("定时任务", menu)
         act_schedule.triggered.connect(self._on_schedules)
         menu.addAction(act_schedule)
@@ -158,9 +163,27 @@ class TrayController:
         self.set_board_enabled(board_store.get_enabled())
 
     def set_board_enabled(self, enabled: bool) -> None:
+        """挂件开关关闭时收起管理/显隐入口；开启时按当前显隐取文案。"""
         action = getattr(self, "_board_manage_action", None)
         if action is not None:
             action.setVisible(bool(enabled))
+        toggle = getattr(self, "_board_toggle_action", None)
+        if toggle is not None:
+            # 挂件构造失败时显隐项没有意义
+            toggle.setVisible(bool(enabled) and self._board_exists())
+            if enabled:
+                toggle.setText(
+                    "隐藏桌面挂件" if self._board_visible() else "显示桌面挂件")
+
+    def _board_exists(self) -> bool:
+        return getattr(self._main, "_board", None) is not None
+
+    def _board_visible(self) -> bool:
+        board = getattr(self._main, "_board", None)
+        return board is not None and board.isVisible()
+
+    def _toggle_board_visible(self) -> None:
+        self._main.toggle_board_visible()
 
     def _on_manage_board(self) -> None:
         self._main.show_board_manager()
