@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 MiHome-Windows contributors
 <#
 .SYNOPSIS
@@ -266,6 +266,17 @@ if ($Clean -and (Test-Path "dist")) {
 # 5. 构建
 # ============================================================
 
+# Qt 自带控件的翻译目录（取色板/消息框按钮等）：Nuitka 默认不复制
+# translations，打包版会整屏英文；显式带进 dist/PySide6/translations，
+# run.py 的加载逻辑会优先在那里找
+$PySide6Translations = (& $Python -c "from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath))" |
+    Where-Object { $_ -match 'translations' } | Select-Object -Last 1).Trim()
+if (-not (Test-Path $PySide6Translations)) {
+    Write-Host "[ERROR] 找不到 PySide6 translations 目录: $PySide6Translations" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  Translations: $PySide6Translations" -ForegroundColor Gray
+
 $NuitkaArgs = @(
     "run.py"
     "--standalone"
@@ -278,6 +289,7 @@ $NuitkaArgs = @(
     "--include-data-files=app\ui\icon.png=app/ui/icon.png"
     "--include-data-files=app\ui\tray_icon.png=app/ui/tray_icon.png"
     "--include-data-files=app\ui\tray_icon_light.png=app/ui/tray_icon_light.png"
+    "--include-data-dir=$PySide6Translations=PySide6/translations"
     "--nofollow-import-to=tkinter,unittest,pytest"
     # tools/ 与 tests/ 不参与打包：Nuitka 只跟随 run.py 的 import 链，
     # 它们本来就不会被带进去；这里显式排除以防将来被间接引用

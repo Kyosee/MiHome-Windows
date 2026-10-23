@@ -53,6 +53,40 @@ def _apply_ui_scale_env() -> None:
     os.environ["QT_SCALE_FACTOR"] = f"{_BASE_UI_SCALE * get_ui_scale():g}"
 
 
+def _install_qt_translator(app) -> None:
+    """加载 Qt 自带控件的中文翻译，兼容源码与 Nuitka 打包两种布局。
+
+    源码模式直接取 QLibraryInfo 指向的 PySide6/translations；打包后该
+    目录被复制到 exe 旁边的 PySide6/translations，QLibraryInfo 不一定
+    指得准，这里按候选路径逐个找，找到就装。
+    """
+    from pathlib import Path
+
+    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+
+    name = f"qtbase_{QLocale.system().name()}.qm"
+    candidates: list[Path] = []
+    try:
+        candidates.append(
+            Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)) / name)
+    except Exception:
+        pass
+    exe_dir = Path(sys.executable).parent
+    candidates.extend((
+        exe_dir / "translations" / name,
+        exe_dir / "PySide6" / "translations" / name,
+    ))
+    for path in candidates:
+        if not path.is_file():
+            continue
+        translator = QTranslator(app)
+        if translator.load(str(path)):
+            app.installTranslator(translator)
+            # 挂到 app 上保活：局部变量被回收后翻译会失效
+            app._qt_translator = translator  # type: ignore[attr-defined]
+            return
+
+
 def main() -> int:
     # 日志先落地：控制台在运行期是隐藏的，异常与失败只能靠文件留存
     from app import setup_logging
@@ -64,17 +98,18 @@ def main() -> int:
 
     # Qt 自带控件的文案（取色板、消息框按钮等）按系统语言加载翻译：
     # 不加载时 QColorDialog 会整屏英文（"Basic colors"/"OK"/"Cancel"）
-    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
-    _qt_translator = QTranslator(app)  # 挂到 app 上保活
-    if _qt_translator.load(QLocale(), "qtbase", "_",
-                           QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
-        app.installTranslator(_qt_translator)
+    _install_qt_translator(app)
 
     # 主题必须在创建任何控件之前生效：调色板决定全部内联样式的取值
     from app.core.settings_store import get_theme_mode
     from app.ui.theme_service import apply_theme
     # apply_theme 内部已设置全局 QSS，无需重复应用
     apply_theme(get_theme_mode())
+
+    # 原生 QToolTip 在系统深色模式下始终是黑底，QSS 覆盖不稳定；
+    # 统一换成自绘提示窗，配色跟随应用主题
+    from app.ui.tooltip import TooltipController
+    app._tooltip_controller = TooltipController(app)  # type: ignore[attr-defined]
 
     # 单实例：仅允许一个进程，二次启动唤起已有窗口。
     # 自重启（MIHOME_RESTARTED=1）时跳过：旧进程即将退出，

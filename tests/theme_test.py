@@ -280,6 +280,30 @@ win._all_devices = []  # 关闭路径不保存假设备
 # 后台线程是 daemon，进程退出时自然结束，测试不必显式 join
 win.close()
 jobs.shutdown()
+
+# ---------- 8. 自绘工具提示：底色跟随主题 ----------
+# 原生 QToolTip 在系统深色模式下始终黑底，QSS 覆盖不稳定，已改为自绘。
+# 这里只验证绘制结果，不真的弹出顶层窗口：offscreen 平台对 Qt.ToolTip
+# 窗口的支持不稳定，show() 会偶发段错误
+from app.ui import si_theme as _si_theme
+from app.ui.tooltip import _TipWindow
+
+# 只切调色板状态，不走全局 setStyleSheet：此时后台线程仍在跑网络调用，
+# 主线程重刷样式表会撞出偶发访问越界
+_si_theme.set_theme("light")
+tip = _TipWindow()
+tip.set_text("设置")
+img = tip.grab().toImage()
+bg = img.pixelColor(tip.width() // 2, 3).name().upper()
+assert bg == "#FFFFFF", f"浅色提示窗底色错误: {bg}"
+_si_theme.set_theme("dark")
+img = tip.grab().toImage()
+bg = img.pixelColor(tip.width() // 2, 3).name().upper()
+assert bg == "#2A2C32", f"深色提示窗底色错误: {bg}"
+tip.deleteLater()
+app.processEvents()
+print("8. 自绘工具提示跟随主题 OK")
+
 settings_store.set_theme_mode("system")
 tray_store.save([])
 print("THEME REGRESSION ALL PASS")
