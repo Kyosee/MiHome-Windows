@@ -199,6 +199,9 @@ class StatusPanelDialog(OverlayDialog):
             card.open_requested.connect(self.open_requested.emit)
             self._cards[device.did] = card
             grid.addWidget(card, index // _CARD_COLUMNS, index % _CARD_COLUMNS)
+        # 在卡片列之后补一列拉伸：卡片不足一行时网格整体靠左，
+        # 而不是被布局均分到中间
+        grid.setColumnStretch(_CARD_COLUMNS, 1)
         return grid
 
     def _toggle(self, card: DeviceCard, did: str, state) -> None:
