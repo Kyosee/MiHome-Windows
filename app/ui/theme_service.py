@@ -53,8 +53,14 @@ def apply_theme(mode: str, accent: str | None = None) -> str:
         if app is not None:
             # 调色板先于 QSS：Qt 自绘控件（下拉弹层、消息框按钮、选区、
             # 工具提示）取调色板，不设就会沿用 Windows 的深浅色而与本应用主题错位
-            app.setPalette(si_theme.build_palette())
+            palette = si_theme.build_palette()
+            app.setPalette(palette)
             app.setStyleSheet(si_theme.build_qss())
+            # QToolTip 是独立顶层窗口，部分环境下不跟随 app 调色板：
+            # 系统深色模式时会出现"黑底深字"几乎看不清，这里显式同步一份
+            from PySide6.QtWidgets import QToolTip
+
+            QToolTip.setPalette(palette)
     except Exception:
         logger.exception("应用全局 QSS 失败")
     return theme

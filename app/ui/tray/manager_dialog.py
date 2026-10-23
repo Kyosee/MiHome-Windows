@@ -84,7 +84,6 @@ class TrayManagerDialog(OverlayDialog):
         header_title.setStyleSheet(f"color: {SiColors.TEXT_PRIMARY}; background: transparent;")
         header.addWidget(header_title)
         header.addStretch(1)
-        header.addWidget(self._make_close_button())
         lay.addWidget(title_bar)
 
         # 分类选项卡：设备 / 场景；默认设备

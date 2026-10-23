@@ -19,7 +19,7 @@ from pathlib import Path
 import shiboken6
 from PySide6.QtCore import QEvent, QPropertyAnimation, QPoint, QSize, Qt, QTimer
 from PySide6.QtWidgets import QGraphicsOpacityEffect
-from PySide6.QtGui import QAction, QFont, QIcon, QPixmap
+from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -417,12 +417,8 @@ class MainWindow(QMainWindow):
         """无边框窗口的内嵌标题栏：拖动移动、双击最大化、窗口控制钮。"""
         bar = QFrame()
         bar.setObjectName("titleBar")
-        bar.setFixedHeight(36)
+        bar.setFixedHeight(32)
 
-        logo = QLabel()
-        from app import resource_path
-        _icon_path = str(resource_path("app/ui/icon.png"))
-        logo.setPixmap(QPixmap(_icon_path).scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         title = QLabel("米家 - MiHome for Windows")
         title.setObjectName("titleBarText")
 
@@ -435,8 +431,6 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(12, 0, 4, 0)
         lay.setSpacing(6)
-        lay.addWidget(logo)
-        lay.addSpacing(4)
         lay.addWidget(title)
         lay.addStretch(1)
         lay.addWidget(min_btn)
@@ -448,7 +442,7 @@ class MainWindow(QMainWindow):
     def _make_window_button(text: str, on_click) -> QPushButton:
         button = QPushButton(text)
         button.setObjectName("titleBarBtn")
-        button.setFixedSize(30, 24)
+        button.setFixedSize(26, 22)
         button.setCursor(Qt.PointingHandCursor)
         button.clicked.connect(on_click)
         return button
@@ -531,7 +525,7 @@ class MainWindow(QMainWindow):
                 return _HTBOTTOM
 
         # 标题栏区域交给系统（拖动/双击最大化）；窗口控制钮保持 HTCLIENT
-        if cy <= 36:
+        if cy <= 32:
             child = self.childAt(int(cx), int(cy))
             if not isinstance(child, QPushButton):
                 return _HTCAPTION

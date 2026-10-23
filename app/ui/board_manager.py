@@ -199,7 +199,6 @@ class BoardManagerDialog(OverlayDialog):
             f"color: {SiColors.TEXT_PRIMARY}; background: transparent;")
         header.addWidget(header_title)
         header.addStretch(1)
-        header.addWidget(self._make_close_button())
         lay.addWidget(title_bar)
 
         # ---- 三个页签：设备 / 场景 / 外观 ----

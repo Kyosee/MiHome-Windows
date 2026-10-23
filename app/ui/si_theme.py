@@ -406,13 +406,15 @@ QWidget#contentHost, QWidget#gridHost {
 
 /* ---------- 内嵌标题栏（无边框窗口） ---------- */
 
+/* 标题栏与内容区同色、无分隔线：窗口本身已经没有系统边框，
+   再给标题栏单独上色会切出一条明显的横线，做不到整窗一体 */
 QFrame#titleBar {
-    background: $TITLE_BAR_BG;
-    border-bottom: 1px solid $TITLE_BAR_BORDER;
+    background: $WINDOW_BG;
+    border: none;
 }
 
 QLabel#titleBarText {
-    font-size: 9pt;
+    font-size: 8pt;
     font-weight: 600;
     color: $TEXT_SUBTLE;
     background: transparent;
@@ -426,7 +428,7 @@ QPushButton#titleBarMax {
     border-radius: 4px;
     color: $TEXT_SUBTLE;
     font-family: "Segoe MDL2 Assets";
-    font-size: 9pt;
+    font-size: 8pt;
 }
 
 QPushButton#titleBarBtn:hover {
@@ -626,7 +628,7 @@ QFrame#voicePanel {
    而全局面板规则把文字刷成主题色 —— 两相叠加会出现「黑底深字」几乎看不清
    （挂件场景卡的「执行场景」就是这样）。这里显式定死背景/文字/描边。 */
 QToolTip {
-    background: $SURFACE;
+    background-color: $SURFACE;
     color: $TEXT_PRIMARY;
     border: 1px solid $LINE;
     border-radius: 6px;

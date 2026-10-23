@@ -607,6 +607,8 @@ print("11. 置顶开关（默认关 / 可开可关 / 几何与显示不丢 / 图
 board_store.set_bg(None)
 board_store.set_topmost(False)
 dlg2 = BoardManagerDialog(devs, None)
+# 右上角的 × 已去掉：底部「取消」承担关闭，避免重复入口
+assert not hasattr(dlg2, "_close_btn"), "挂件管理窗不应再有关闭按钮"
 bg_events: list = []
 top_events: list = []
 dlg2.background_preview.connect(bg_events.append)
@@ -1250,6 +1252,8 @@ print("24. 管理窗分页 + 行铺满 + 无排序 + 按钮跟随主题色 OK")
 from app.ui.tray.manager_dialog import TrayManagerDialog
 
 tm = TrayManagerDialog(devs, None, scenes=[])
+# 右上角的 × 已去掉：底部「取消」承担关闭
+assert not hasattr(tm, "_close_btn"), "托盘管理窗不应再有关闭按钮"
 tm.show()
 app.processEvents()
 

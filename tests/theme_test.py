@@ -165,7 +165,8 @@ app.processEvents()
 
 img = win.grab().toImage()
 bg = img.pixelColor(500, 18)
-assert bg.name().upper() == "#ECECEF", f"浅色标题栏异常: {bg.name()}"
+# 标题栏与内容区同色（无分割线），取窗口底色即可
+assert bg.name().upper() == "#F2F3F5", f"浅色标题栏异常: {bg.name()}"
 card = next(iter(win._cards.values()))
 cimg = card.grab().toImage()
 cc = cimg.pixelColor(5, 5)
@@ -178,7 +179,8 @@ app.processEvents()
 assert si_theme.current_theme() == "dark"
 img = win.grab().toImage()
 bg = img.pixelColor(500, 18)
-assert bg.name().upper() == "#1A1B20", f"深色标题栏异常: {bg.name()}"
+# 标题栏与内容区同色（无分割线），取窗口底色即可
+assert bg.name().upper() == "#1E1F24", f"深色标题栏异常: {bg.name()}"
 card = next(iter(win._cards.values()))
 cimg = card.grab().toImage()
 cc = cimg.pixelColor(5, 5)
@@ -189,7 +191,8 @@ print("4. 切换深色重建 OK")
 win.apply_theme_mode("light")
 app.processEvents()
 img = win.grab().toImage()
-assert img.pixelColor(500, 18).name().upper() == "#ECECEF"
+# 标题栏跟随窗口底色，不再单独上色
+assert img.pixelColor(500, 18).name().upper() == "#F2F3F5"
 print("4b. 切回浅色 OK")
 
 # ---------- 5. 设置页：下拉预览 + 取消还原 ----------
