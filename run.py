@@ -111,6 +111,10 @@ def main() -> int:
     from app.ui.tooltip import TooltipController
     app._tooltip_controller = TooltipController(app)  # type: ignore[attr-defined]
 
+    # 滚轮滚动统一走缓动动画，避免原生逐条跳变的抽帧感
+    from app.ui.smooth_scroll import SmoothScrollFilter
+    app._smooth_scroll = SmoothScrollFilter(app)  # type: ignore[attr-defined]
+
     # 单实例：仅允许一个进程，二次启动唤起已有窗口。
     # 自重启（MIHOME_RESTARTED=1）时跳过：旧进程即将退出，
     # 此时锁/server 尚在，走正常单实例会被当成「唤起旧窗口」。
