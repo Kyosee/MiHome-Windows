@@ -231,10 +231,10 @@ class SettingsDialog(OverlayDialog):
         self._theme_combo.currentTextChanged.connect(self._on_theme_selected)
         theme_row.addWidget(self._theme_combo)
 
-        # ── 主题色（预设色块 + 自定义取色板） ──
+        # ── 控件主题色（预设色块 + 自定义取色板） ──
         self._accent_item, self._accent_label, self._accent_desc, accent_row = \
             self._make_item(
-                "主题色",
+                "控件主题色",
                 "为按钮、开关、选中项与浮窗统一配色，深色/浅色模式共用；"
                 "点「自定义」打开取色板任选颜色")
         self._original_accent = settings_store.get_theme_accent() or DEFAULT_ACCENT
