@@ -684,6 +684,48 @@ class MijiaService:
             result[did] = format_metrics_text(temps.get(did), hums.get(did))
         return result
 
+    def consumable_items(self) -> list[dict]:
+        """耗材明细：设备名、耗材描述、当前值、不足阈值与更新时间。
+
+        不足判定与米家 App 一致：details.value 低于 details.inadeq.val。
+        接口异常返回空列表，顶栏隐藏该项即可，不影响主流程。
+        """
+        try:
+            raw_items = self._api.get_consumable_items()
+        except Exception:
+            logger.debug("读取耗材列表失败", exc_info=True)
+            return []
+        result: list[dict] = []
+        for item in raw_items or []:
+            if item.get("is_ignore"):
+                continue
+            detail = item.get("details") or {}
+            try:
+                value = float(detail.get("value"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                threshold = float(json.loads(detail.get("inadeq") or "{}").get("val"))
+            except (TypeError, ValueError):
+                threshold = None
+            result.append({
+                "did": str(item.get("did") or ""),
+                "name": str(item.get("name") or ""),
+                "model": str(item.get("model") or ""),
+                "description": str(detail.get("description") or ""),
+                "type": str(detail.get("type_name") or ""),
+                "value": value,
+                "threshold": threshold,
+                "low": threshold is not None and value < threshold,
+                "updated": int(detail.get("update_time") or 0),
+            })
+        return result
+
+    def consumable_low_count(self) -> tuple[int, int]:
+        """耗材统计：返回 (耗材项数, 不足项数)。"""
+        items = self.consumable_items()
+        return len(items), sum(1 for item in items if item["low"])
+
     def _specs_for(self, dids: list[str]) -> dict[str, dict | None]:
         """did -> spec 映射，spec_type 增量补齐 + spec 并发拉取。
 

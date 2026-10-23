@@ -390,6 +390,19 @@ win = MainWindow()
 assert win._board is not None, "挂件创建失败"
 win._apply_devices(devs)
 app.processEvents()
+# 顶栏状态胶囊：亮灯数/温湿度/耗材按当前范围刷新
+win._known_power = {devs[0].did: True, devs[1].did: False}
+win._metrics = {devs[0].did: "22.1°C 69%"}
+win._consumables = [{"did": devs[0].did, "name": "牙刷", "description": "电池",
+                     "value": 22, "threshold": 25, "low": True, "updated": 0}]
+win._update_count_label()
+assert not win._light_pill.isHidden() and "开启 1" in win._light_pill.text(), \
+    f"开启设备数胶囊异常: {win._light_pill.text()}"
+assert not win._temp_pill.isHidden() and "22.1" in win._temp_pill.text(), \
+    f"温度胶囊异常: {win._temp_pill.text()}"
+assert not win._humidity_pill.isHidden() and "69" in win._humidity_pill.text(), \
+    f"湿度胶囊异常: {win._humidity_pill.text()}"
+assert not win._consumable_pill.isHidden(), "耗材不足胶囊未显示"
 # 主窗口设备推送后挂件拿到全量清单
 assert len(win._board._dids) == len(devs)
 # 关闭主窗口房间筛选不应影响挂件（挂件用全量列表）
@@ -1134,6 +1147,11 @@ more_texts = [a.text() for a in win._more_menu.actions() if a.text()]
 assert "桌面挂件" not in more_texts, f"主菜单仍残留「桌面挂件」: {more_texts}"
 assert "管理桌面挂件" in more_texts
 assert "隐藏桌面挂件" in more_texts
+# 刷新与设置独立成顶栏图标按钮，不再占用菜单项
+assert "刷新" not in more_texts and "设置" not in more_texts, \
+    f"刷新/设置应独立成图标按钮: {more_texts}"
+assert hasattr(win, "_refresh_btn") and hasattr(win, "_settings_btn"), \
+    "顶栏缺少刷新/设置图标按钮"
 if win._tray is not None:
     tray_texts = [a.text() for a in win._tray._tray.contextMenu().actions()
                   if a.text()]

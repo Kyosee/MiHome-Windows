@@ -49,6 +49,7 @@ from app.ui.device_card import DeviceCard
 from app.ui.device_dialog import DeviceDetailDialog
 from app.ui.scene_card import SceneCard
 from app.ui.schedule_dialog import ScheduleDialog
+from app.ui import si_theme
 from app.ui.si_theme import SiColors, themed_tab_button
 from app.ui.toast import Toast
 from app.ui.tray import TrayController, TrayManagerDialog
@@ -100,6 +101,69 @@ _HTBOTTOMLEFT = 16
 _HTBOTTOMRIGHT = 17
 
 
+def _split_metrics(text: str) -> tuple[str, str]:
+    """把 "22.2°C 67%" 拆成温度与湿度两段，缺失的一段返回空串。"""
+    temp = ""
+    humidity = ""
+    for part in text.split():
+        if part.endswith("°C"):
+            temp = part
+        elif part.endswith("%"):
+            humidity = part
+    return temp, humidity
+
+
+class _IconButton(QPushButton):
+    """顶栏纯图标按钮：无底色、无边框，悬停时图标提亮。
+
+    顶栏右侧的刷新/设置/更多都是低频但需要常驻的入口，做成带框按钮
+    会显得笨重；只留图标 + 悬停变色，既干净又能看出可点。
+    """
+
+    def __init__(self, icon_name: str, tip: str, parent=None):
+        super().__init__(parent)
+        self._icon_name = icon_name
+        self._hover = False
+        self.setFixedSize(32, 32)
+        self.setIconSize(QSize(24, 24))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tip)
+        self.setStyleSheet(
+            "QPushButton { background: transparent; border: none; }")
+        self._sync_icon()
+
+    def _sync_icon(self) -> None:
+        if not self.isEnabled():
+            color = SiColors.TEXT_DISABLED
+        else:
+            # 浅色底上深灰图标显得重，默认再淡一档；深色底保持可辨识度
+            light = si_theme.current_theme() == "light"
+            if self._hover:
+                color = SiColors.TEXT_SECONDARY if light else SiColors.TEXT_PRIMARY
+            else:
+                color = SiColors.TEXT_MUTED if light else SiColors.TEXT_SECONDARY
+        self.setIcon(qta.icon(self._icon_name, color=color))
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self._sync_icon()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self._sync_icon()
+        super().leaveEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        # 刷新中禁用时图标要同步变灰
+        if event.type() == QEvent.Type.EnabledChange:
+            self._sync_icon()
+        super().changeEvent(event)
+
+    def retheme(self) -> None:
+        self._sync_icon()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -138,6 +202,9 @@ class MainWindow(QMainWindow):
         self._known_power: dict[str, bool | None] = {}
         # did -> 环境读数文案（温湿度），随轮询更新、随网格重建回填
         self._metrics: dict[str, str | None] = {}
+        # 耗材明细（全屋口径）：不足项数大于 0 时显示提示胶囊
+        self._consumables: list[dict] = []
+        self._consumable_low = 0
         # 刷新防重入：请求在途时忽略再次点击
         self._loading_devices = False
         # 启动自动检查更新每次进程只做一次，避免 start 被重复触发
@@ -221,6 +288,8 @@ class MainWindow(QMainWindow):
 
         # 桌面挂件：常驻桌面的设备控制板，与托盘快捷窗口并列的独立入口。
         # 构造失败不得影响主流程（挂件是增强功能，缺失只少个面板）
+        # 当前打开的状态明细面板（同一时刻只会有一个）
+        self._status_panel = None
         self._board_manager: BoardManagerDialog | None = None
         try:
             self._board = WidgetsBoard(self._service, self._jobs, None)
@@ -263,11 +332,13 @@ class MainWindow(QMainWindow):
         self._count_label.setTextFormat(Qt.TextFormat.RichText)
         top_bar.addWidget(self._count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         top_bar.addStretch(1)
-        # 更多菜单按钮：收起托盘管理、刷新等低频操作
+        # 刷新与设置是高频入口，做成常驻图标按钮；托盘/定时任务/挂件
+        # 这些低频配置收进「更多」，菜单只留必要的几项
+        self._refresh_btn = _IconButton("mdi.refresh", "刷新设备", self)
+        self._refresh_btn.clicked.connect(self.load_devices)
+        self._settings_btn = _IconButton("mdi.cog-outline", "设置", self)
+        self._settings_btn.clicked.connect(self.show_settings)
         self._more_menu = QMenu()
-        self._refresh_action = QAction("刷新", self._more_menu)
-        self._refresh_action.triggered.connect(self.load_devices)
-        self._more_menu.addAction(self._refresh_action)
         self._more_menu.addAction("托盘管理").triggered.connect(self.show_tray_manager)
         self._more_menu.addAction("定时任务").triggered.connect(self.show_schedules)
         # 桌面挂件不再是"随手开关"：在 设置 → 应用功能 里统一启用/停用。
@@ -279,19 +350,18 @@ class MainWindow(QMainWindow):
         self._board_toggle_action = QAction("隐藏桌面挂件", self._more_menu)
         self._board_toggle_action.triggered.connect(self.toggle_board_visible)
         self._more_menu.addAction(self._board_toggle_action)
-        self._more_menu.addAction("设置").triggered.connect(self.show_settings)
         # 「关于」固定在菜单最底部
         self._more_menu.addSeparator()
         self._more_menu.addAction("关于").triggered.connect(self.show_about)
-        self._more_btn = QPushButton()
-        self._more_btn.setIconSize(QSize(22, 22))
-        self._more_btn.setFixedSize(36, 36)
-        self._more_btn.setCursor(Qt.PointingHandCursor)
+        self._more_btn = _IconButton("mdi.dots-horizontal", "更多", self)
         self._more_btn.clicked.connect(self._show_more_menu)
         btn_wrapper = QWidget()
         btn_wrapper.setStyleSheet("background: transparent;")
         btn_layout = QHBoxLayout(btn_wrapper)
         btn_layout.setContentsMargins(0, 30, 25, 0)
+        btn_layout.setSpacing(2)
+        btn_layout.addWidget(self._refresh_btn)
+        btn_layout.addWidget(self._settings_btn)
         btn_layout.addWidget(self._more_btn)
         top_bar.addWidget(btn_wrapper)
         content.addLayout(top_bar)
@@ -301,6 +371,23 @@ class MainWindow(QMainWindow):
         self._tab_row.setSpacing(14)
         self._tab_buttons: dict[str, SiToggleButtonRefactor] = {}
         content.addLayout(self._tab_row)
+
+        # ---- 环境状态胶囊：房间栏下方一行，点击看明细 ----
+        self._temp_pill = self._make_status_pill(
+            "mdi.thermometer", "当前范围的温度", self._show_env_detail)
+        self._humidity_pill = self._make_status_pill(
+            "mdi.water-percent", "当前范围的湿度", self._show_env_detail)
+        self._light_pill = self._make_status_pill(
+            "mdi.power", "当前范围内开启的设备", self._show_light_detail)
+        self._consumable_pill = self._make_status_pill(
+            "mdi.circle-slice-8", "耗材不足的设备", self._show_consumable_detail)
+        self._status_row = QHBoxLayout()
+        self._status_row.setSpacing(8)
+        for pill in (self._temp_pill, self._humidity_pill,
+                     self._light_pill, self._consumable_pill):
+            self._status_row.addWidget(pill)
+        self._status_row.addStretch(1)
+        content.addLayout(self._status_row)
 
         # ---- 卡片滚动区 ----
         self._scroll = QScrollArea()
@@ -358,14 +445,25 @@ class MainWindow(QMainWindow):
             f"color: {SiColors.TEXT_MUTED}; background: {SiColors.CARD};"
             f" border: 1px solid {SiColors.LINE}; border-radius: 11px;"
             " padding: 0 10px; font-size: 9pt;")
+        # 胶囊用卡片底色 + 细描边：浅色主题下窗口底色与 SURFACE 太接近，
+        # 不描边会整块"消失"；悬停时描边变主题色，提示可点击
+        pill_qss = (
+            f"QPushButton {{ background: {SiColors.CARD};"
+            f" border: 1px solid {SiColors.LINE}; border-radius: 14px;"
+            f" padding: 0 12px 0 9px; color: {SiColors.TEXT_PRIMARY};"
+            " font-size: 9pt; }"
+            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER};"
+            f" border-color: {SiColors.THEME}; }}")
+        for pill in (self._temp_pill, self._humidity_pill,
+                     self._light_pill, self._consumable_pill):
+            pill.setStyleSheet(pill_qss)
+            pill.setIcon(qta.icon(pill._icon_name, color=SiColors.TEXT_SECONDARY))
         self._more_menu.setStyleSheet(
             f"QMenu {{ background: {SiColors.CARD}; border: 1px solid {SiColors.BTN_HOVER}; border-radius: 8px; padding: 4px; }}"
             f"QMenu::item {{ color: {SiColors.TEXT_PRIMARY}; padding: 6px 24px 6px 12px; border-radius: 4px; }}"
             f"QMenu::item:selected {{ background: {SiColors.BTN_HOVER}; }}")
-        self._more_btn.setIcon(qta.icon('mdi.dots-horizontal', color=SiColors.TEXT_PRIMARY))
-        self._more_btn.setStyleSheet(
-            f"QPushButton {{ background: {SiColors.CARD}; border: none; border-radius: 8px; }}"
-            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}")
+        for btn in (self._refresh_btn, self._settings_btn, self._more_btn):
+            btn.retheme()
 
     def apply_theme_mode(self, mode: str, accent: str | None = None) -> None:
         """设置页切换主题/主题色入口：应用后经 theme_changed 信号触发重建。
@@ -412,6 +510,19 @@ class MainWindow(QMainWindow):
             self._refresh_power_states(force=False)
 
     # ---------- 内嵌标题栏与窗口操作 ----------
+
+    @staticmethod
+    def _make_status_pill(icon_name: str, tip: str, on_click) -> QPushButton:
+        """环境状态胶囊：图标 + 数值，点击弹出明细列表。"""
+        pill = QPushButton()
+        pill.setFixedHeight(28)
+        pill.setCursor(Qt.CursorShape.PointingHandCursor)
+        pill.setIconSize(QSize(14, 14))
+        pill.setToolTip(tip)
+        pill.setVisible(False)
+        pill.clicked.connect(on_click)
+        pill._icon_name = icon_name  # type: ignore[attr-defined]
+        return pill
 
     def _build_title_bar(self) -> QWidget:
         """无边框窗口的内嵌标题栏：拖动移动、双击最大化、窗口控制钮。"""
@@ -623,6 +734,9 @@ class MainWindow(QMainWindow):
         self._show_status("已从本地缓存加载，点击右上角菜单刷新可同步最新设备")
         self._apply_devices(devices)
         self._apply_board_enabled()
+        # 缓存命中不会走 _on_devices_loaded，耗材要单独拉一次，
+        # 否则启动后要手动刷新才出现
+        self._refresh_consumables()
 
     def _apply_board_enabled(self) -> None:
         """按设置里的「桌面挂件」开关显示/隐藏挂件，并同步各菜单入口。
@@ -795,8 +909,8 @@ class MainWindow(QMainWindow):
         if self._loading_devices:
             return
         self._loading_devices = True
-        self._refresh_action.setEnabled(False)
-        self._refresh_action.setText("刷新中…")
+        self._refresh_btn.setEnabled(False)
+        self._refresh_btn.setToolTip("刷新中…")
         self._show_status("正在获取设备列表…")
         self._jobs.submit(
             self._service.list_devices,
@@ -806,13 +920,14 @@ class MainWindow(QMainWindow):
 
     def _on_devices_loaded(self, devices: list[DeviceInfo]) -> None:
         self._loading_devices = False
-        self._refresh_action.setEnabled(True)
-        self._refresh_action.setText("刷新")
+        self._refresh_btn.setEnabled(True)
+        self._refresh_btn.setToolTip("刷新设备")
         # 对比要在替换前做：added/removed 以旧列表为基准
         added, removed = self._diff_devices(devices)
         self._apply_devices(devices)
         device_cache.save(devices, self._known_power, self._metrics)
         self._apply_board_enabled()
+        self._refresh_consumables()
         if self._all_devices or added or removed:
             Toast.info(self, _refresh_summary(len(devices), added, removed))
 
@@ -1272,10 +1387,11 @@ class MainWindow(QMainWindow):
             count = len(self._scenes or [])
             self._count_label.setText(
                 f'<span style="color:{muted}">共 {count} 个场景</span>')
+            for pill in (self._temp_pill, self._humidity_pill,
+                         self._light_pill, self._consumable_pill):
+                pill.setVisible(False)
             return
-        subset = self._visible_devices() if self._current_home == _ALL_HOMES else [
-            d for d in self._visible_devices() if d.home_name == self._current_home
-        ]
+        subset = self._visible_subset()
         total = len(subset)
         online = sum(1 for d in subset if d.online)
         self._count_label.setText(
@@ -1283,6 +1399,142 @@ class MainWindow(QMainWindow):
             f'&nbsp;&nbsp;<span style="color:{online_dot}">●</span>'
             f'&nbsp;<span style="color:{muted}">{online} 台在线</span>'
         )
+        self._update_status_pills(subset)
+
+    def _update_status_pills(self, subset: list[DeviceInfo]) -> None:
+        """刷新环境状态胶囊。
+
+        温湿度按"第一个有读数的设备"取值：全屋时是列表里第一台温湿度计，
+        切到某个房间后自然变成该房间内的第一台，不需要额外聚合。
+        开启数只统计当前范围内状态确认为开的设备。
+        """
+        # 温度与湿度分开显示：取第一个能读到对应数值的设备
+        temp_text = ""
+        humidity_text = ""
+        for device in subset:
+            value = self._metrics.get(device.did)
+            if not value:
+                continue
+            temp, humidity = _split_metrics(value)
+            if not temp_text and temp:
+                temp_text = temp
+            if not humidity_text and humidity:
+                humidity_text = humidity
+            if temp_text and humidity_text:
+                break
+        self._temp_pill.setText(temp_text)
+        self._temp_pill.setVisible(bool(temp_text))
+        self._humidity_pill.setText(humidity_text)
+        self._humidity_pill.setVisible(bool(humidity_text))
+
+        lights = sum(1 for d in subset if self._known_power.get(d.did) is True)
+        self._light_pill.setText(f"开启 {lights}")
+        self._light_pill.setVisible(lights > 0)
+
+        # 耗材跟随当前家庭/房间归属，不再用全屋口径
+        low = sum(1 for item in self._consumables_in_scope(subset) if item.get("low"))
+        self._consumable_low = low
+        self._consumable_pill.setText(f"耗材不足 {low}")
+        self._consumable_pill.setVisible(low > 0)
+
+    def _refresh_consumables(self) -> None:
+        """异步拉一次耗材明细（全屋口径），失败静默不影响主流程。"""
+        self._jobs.submit(
+            self._service.consumable_items,
+            on_success=self._on_consumables_loaded,
+            on_error=lambda exc: logger.debug("耗材统计失败: %s", exc),
+        )
+
+    def _on_consumables_loaded(self, items) -> None:
+        self._consumables = items or []
+        self._consumable_low = sum(1 for item in self._consumables if item.get("low"))
+        self._update_count_label()
+
+    def _visible_subset(self) -> list[DeviceInfo]:
+        """当前家庭 + 房间筛选后的设备列表（统计与明细共用）。"""
+        visible = self._visible_devices()
+        if self._current_home == _ALL_HOMES:
+            return visible
+        return [d for d in visible if d.home_name == self._current_home]
+
+    def _open_status_panel(self, title: str, subtitle: str, groups) -> None:
+        """打开状态明细面板（胶囊点击的统一入口）。"""
+        from app.ui.status_panel import StatusPanelDialog
+
+        dlg = StatusPanelDialog(title, subtitle, groups, self)
+        # 面板里的设备卡片与主页同款：开关/点开详情都走主窗口同一条链路
+        dlg.power_toggled.connect(self._on_power_clicked)
+        dlg.open_requested.connect(self._on_open_device)
+        # 开关结果回来后要回填面板里的卡片（失败回滚也走这里）
+        self._status_panel = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._status_panel = None
+            dlg.deleteLater()
+
+    def _show_env_detail(self) -> None:
+        rows = [
+            {
+                "device": d,
+                "state": self._known_power.get(d.did),
+                "metrics": self._metrics.get(d.did),
+                "icon": icon_store.icon_path(d.model),
+            }
+            for d in self._visible_subset() if self._metrics.get(d.did)
+        ]
+        self._open_status_panel("温湿度", f"{len(rows)} 台设备有读数", [("", rows)])
+
+    def _show_light_detail(self) -> None:
+        by_room: dict[str, list[dict]] = {}
+        for device in self._visible_subset():
+            if self._known_power.get(device.did) is True:
+                by_room.setdefault(device.room_name, []).append({
+                    "device": device,
+                    "state": True,
+                    "icon": icon_store.icon_path(device.model),
+                })
+        groups = [(room, rows) for room, rows in by_room.items()]
+        count = sum(len(rows) for _room, rows in groups)
+        # 统计口径是"开关为开的设备"，不限于灯具，文案不要写死成灯
+        self._open_status_panel("开启的设备", f"{count} 个设备已开启", groups)
+
+    def _consumables_in_scope(self, subset=None) -> list[dict]:
+        """当前家庭/房间范围内的耗材，设备名换成列表里的中文名。
+
+        耗材接口返回的是设备英文名（如 mijia E-toothbrush t700），
+        这里用 did 对齐设备列表，统一显示界面里已有的中文名。
+        subset 由调用方传入可省掉一次可见设备遍历。
+        """
+        devices = subset if subset is not None else self._visible_subset()
+        lookup = {d.did: d for d in devices}
+        result = []
+        for item in self._consumables:
+            device = lookup.get(item.get("did"))
+            if device is None:
+                continue
+            entry = dict(item)
+            entry["name"] = device.name
+            entry["room_name"] = device.room_name
+            result.append(entry)
+        return result
+
+    def _show_consumable_detail(self) -> None:
+        rows = []
+        for item in self._consumables_in_scope():
+            if not item.get("low"):
+                continue
+            parts = [item.get("room_name") or ""]
+            if item.get("updated"):
+                when = datetime.fromtimestamp(item["updated"]).strftime("%Y-%m-%d %H:%M")
+                parts.append(f"更新于 {when}")
+            rows.append({
+                "name": item.get("name") or "",
+                "sub": " · ".join(p for p in parts if p),
+                "percent": item.get("value"),
+                "icon": icon_store.icon_path(item.get("model") or ""),
+            })
+        self._open_status_panel("耗材", f"{len(rows)} 项不足", [("", rows)])
 
     def _on_poll_tick(self) -> None:
         if self._poll_in_flight or not self._all_devices:
@@ -1372,6 +1624,8 @@ class MainWindow(QMainWindow):
                 continue
             self._apply_power_state(did, state)
         self._maybe_localize_names()
+        # 开关状态变了，开启的设备数要跟着更新
+        self._update_count_label()
         self._update_tray_devices()
         # 挂件就地更新按钮状态（不整窗重建，避免每 5 秒一次重建抖动）
         if self._board is not None:
@@ -1393,6 +1647,11 @@ class MainWindow(QMainWindow):
         card = self._cards.get(did)
         if card is not None and state is not None:
             card.set_power_state(state)
+        # 明细面板开着时同步它里面的同款卡片：面板内的按钮是乐观翻转，
+        # 这里用真实结果覆盖（下发失败会回滚成原状态）
+        panel = getattr(self, "_status_panel", None)
+        if panel is not None and shiboken6.isValid(panel) and state is not None:
+            panel.update_power(did, state)
 
     def _refresh_metrics(self) -> None:
         """为无开关能力的可见设备批量拉温湿度读数（副标题展示）。
@@ -1429,6 +1688,8 @@ class MainWindow(QMainWindow):
             device_cache.save(self._all_devices, self._known_power, self._metrics)
         self._maybe_localize_names()
         self._push_tray_metrics()
+        # 温湿度读数变了，顶栏胶囊要跟着更新
+        self._update_count_label()
 
     def _push_tray_metrics(self) -> None:
         """把温湿度读数同步给托盘快捷窗口与桌面挂件（副标题展示）。"""
@@ -1526,6 +1787,10 @@ class MainWindow(QMainWindow):
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _on_load_error(self, error: Exception) -> None:
+        # 失败也要复位刷新状态，否则按钮一直禁用、只能重启才能再刷新
+        self._loading_devices = False
+        self._refresh_btn.setEnabled(True)
+        self._refresh_btn.setToolTip("刷新设备")
         self._show_status("加载失败", 4000)
         QMessageBox.critical(self, "加载失败", str(error))
 
