@@ -116,9 +116,10 @@ class TrayManagerDialog(OverlayDialog):
         self._subtitle.setStyleSheet(f"color: {SiColors.TEXT_SECONDARY}; background: transparent; font-size: 9pt;")
         lay.addWidget(self._subtitle)
 
-        # 顶部搜索：设备多时靠滚动找太慢，按设备名 / 房间 / 场景名过滤
+        # 顶部搜索：设备多时靠滚动找太慢。提示词按当前页给，
+        # 设备页不出现"场景"、场景页不出现"设备"，避免误导搜索范围
         self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索设备 / 场景 / 房间…")
+        self._search.setPlaceholderText("搜索设备 / 房间…")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(28)
         self._search.setStyleSheet(
@@ -638,6 +639,8 @@ class TrayManagerDialog(OverlayDialog):
         is_list = self._view == "list"
         self._scroll.setVisible(is_dev and is_list)
         self._scene_scroll.setVisible(not is_dev and is_list)
+        self._search.setPlaceholderText(
+            "搜索设备 / 房间…" if is_dev else "搜索场景 / 家庭…")
         self._update_subtitle()
         if not is_dev:
             self._ensure_scenes()

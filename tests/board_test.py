@@ -1256,6 +1256,15 @@ tm = TrayManagerDialog(devs, None, scenes=[])
 assert not hasattr(tm, "_close_btn"), "托盘管理窗不应再有关闭按钮"
 tm.show()
 app.processEvents()
+# 搜索提示词按页切换：设备页不出现"场景"，场景页不出现"设备"
+assert "设备" in tm._search.placeholderText()
+assert "场景" not in tm._search.placeholderText()
+tm._switch_tab(1)
+app.processEvents()
+assert "场景" in tm._search.placeholderText(), tm._search.placeholderText()
+assert "设备" not in tm._search.placeholderText(), tm._search.placeholderText()
+tm._switch_tab(0)
+app.processEvents()
 
 
 def _visible_rows(dialog):
