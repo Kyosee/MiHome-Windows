@@ -38,6 +38,9 @@ _DEFAULTS: dict = {
     "room_order": [],
     # 启动后默认打开的标签名；空串表示「全屋」
     "default_tab": "",
+    # did -> 卡片副标题要显示的属性名列表（最多两个）。键不存在表示用
+    # 默认温湿度；值恰好是空列表表示用户明确选择不外显，两者语义不同
+    "metrics_selection": {},
 }
 
 
@@ -53,6 +56,50 @@ def _read_raw() -> dict:
 
 def _write_raw(raw: dict) -> None:
     _json_store.write_json(_json_store.data_file(_FILENAME), raw)
+
+
+def get_metrics_selection() -> dict[str, list[str]]:
+    """did -> 卡片副标题要显示的属性名列表。
+
+    三种状态靠键是否存在于返回值里区分：没有这个 did 表示从未设置
+    过（用默认温湿度）；值是空列表表示用户明确选择了不外显；值非空
+    则是具体的属性。调用方要用 in / is not None 判断，不能靠真假值。
+    """
+    raw = _read_raw().get("metrics_selection")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for did, props in raw.items():
+        if isinstance(props, list):
+            result[str(did)] = [str(p) for p in props
+                                if isinstance(p, str) and p][:2]
+    return result
+
+
+def set_metrics_selection(did: str, props: list[str]) -> None:
+    """写入某台设备的副标题属性。
+
+    传空列表表示明确不外显，会保留一条空记录；要恢复默认请调用
+    clear_metrics_selection 把键删掉，两者语义不同。
+    """
+    raw = _read_raw()
+    current = raw.get("metrics_selection")
+    if not isinstance(current, dict):
+        current = {}
+    current[did] = [str(p) for p in props if isinstance(p, str) and p][:2]
+    raw["metrics_selection"] = current
+    _write_raw(raw)
+
+
+def clear_metrics_selection(did: str) -> None:
+    """删掉这台设备的记录，回到默认温湿度。"""
+    raw = _read_raw()
+    current = raw.get("metrics_selection")
+    if not isinstance(current, dict):
+        return
+    if current.pop(did, None) is not None:
+        raw["metrics_selection"] = current
+        _write_raw(raw)
 
 
 def get_default_tab() -> str:

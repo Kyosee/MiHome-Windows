@@ -674,30 +674,60 @@ class MijiaService:
 
     # ---------- 环境读数（卡片副标题展示用） ----------
 
-    def read_metrics(self, dids: list[str]) -> dict[str, str | None]:
-        """批量读取温湿度并拼成卡片副标题文案。
+    def read_metrics(self, dids: list[str],
+                     selections: dict[str, list[str]] | None = None,
+                     climate_out: dict[str, dict[str, float]] | None = None,
+                     climate_candidates: list[str] | None = None
+                     ) -> dict[str, str | None]:
+        """批量读取卡片副标题要显示的属性，拼成展示文案。
 
-        匹配 SI 标准属性：temperature 与 relative-humidity（个别型号
-        也叫 humidity），读不到的设备返回 None（副标题维持纯房间名）。
+        默认读 temperature 与 relative-humidity（个别型号叫 humidity），
+        插座这类设备更关心功率，可由 selections 指定每个 did 要显示的
+        属性名（最多两个）。读不到的设备返回 None，副标题维持纯房间名。
         多通道设备的同名属性取第一个通道。
+
+        climate_out 传入字典时，会把每台设备读到的温湿度原始值一并
+        写进去：顶部环境胶囊固定展示温湿度，不能从用户自定义过的
+        副标题文案里反推。climate_candidates 是没有副标题需求、但仍要
+        为胶囊读温湿度的设备（比如用户把外显改成不外显或换成功率），
+        规格里没有温湿度属性的会被自动跳过。
         """
-        spec_map = self._specs_for(dids)
+        selections = selections or {}
+        # 温湿度候选设备也一起取 spec：同一批请求内完成，不额外发网络请求。
+        # 先按原顺序去重再排除已有副标题需求的设备，避免重复查询同一 did
+        base = set(dids)
+        extra = [d for d in dict.fromkeys(climate_candidates or [])
+                 if d not in base]
+        spec_map = self._specs_for(list(dids) + extra)
         queries: list[dict] = []
-        key_to_metric: dict[tuple, tuple[str, str]] = {}  # (did,siid,piid) -> (did, metric)
+        # (did, siid, piid) -> (did, 属性名)
+        key_to_metric: dict[tuple, tuple[str, str]] = {}
         result: dict[str, str | None] = {}
         for did in dids:
+            if did in selections:
+                # 键存在就用它的值：空列表代表用户明确选了不外显，
+                # 不能拿真假值判断，否则会退回默认温湿度
+                wanted = list(selections[did])
+            else:
+                wanted = list(_DEFAULT_METRICS)
+            # 温湿度始终顺带读一次：顶部环境胶囊要固定展示它们，
+            # 而卡片的副标题可能被用户改成别的属性
+            for name in _DEFAULT_METRICS:
+                if name not in wanted:
+                    wanted.append(name)
             info = spec_map.get(did)
+            # 属性名按优先级排序：用户选择顺序即显示顺序
             found: dict[str, dict] = {}
             if info:
-                for prop in info.get("properties", []):
-                    name = prop.get("name")
-                    metric = (
-                        "temperature" if name == "temperature"
-                        else "humidity" if name in ("relative-humidity", "humidity")
-                        else None
-                    )
-                    if metric and "r" in prop.get("rw", "") and metric not in found:
-                        found[metric] = prop["method"]
+                by_name = {p.get("name"): p for p in info.get("properties", [])
+                           if "r" in p.get("rw", "")}
+                for name in wanted:
+                    prop = by_name.get(name)
+                    if prop is None and name in ("humidity", "relative-humidity"):
+                        # 两种写法在规格里叫法不一，互相兜底
+                        prop = by_name.get("relative-humidity") or by_name.get("humidity")
+                    if prop is not None and name not in found:
+                        found[name] = prop["method"]
             if not found:
                 result[did] = None
                 continue
@@ -705,8 +735,28 @@ class MijiaService:
                 queries.append({"did": did, **method})
                 key_to_metric[(did, method["siid"], method["piid"])] = (did, metric)
 
-        temps: dict[str, float] = {}
-        hums: dict[str, float] = {}
+        # 只为胶囊读温湿度的设备：规格里没有这两项的直接跳过。
+        # 必须在下面发请求之前补齐查询，否则这些读数永远不会被读取
+        for did in extra:
+            info = spec_map.get(did)
+            if not info:
+                continue
+            by_name = {p.get("name"): p for p in info.get("properties", [])
+                       if "r" in p.get("rw", "")}
+            picked: dict[str, dict] = {}
+            temp_prop = by_name.get("temperature")
+            if temp_prop is not None:
+                picked["temperature"] = temp_prop["method"]
+            # 湿度在规格里有 relative-humidity 与 humidity 两种写法
+            hum_prop = by_name.get("relative-humidity") or by_name.get("humidity")
+            if hum_prop is not None:
+                picked["relative-humidity"] = hum_prop["method"]
+            for name, method in picked.items():
+                queries.append({"did": did, **method})
+                key_to_metric[(did, method["siid"], method["piid"])] = (did, name)
+
+        # did -> 属性名 -> 数值，最终按选择顺序拼成文案
+        values: dict[str, dict[str, float]] = {}
         for start in range(0, len(queries), _BATCH_SIZE):
             batch = queries[start:start + _BATCH_SIZE]
             try:
@@ -725,13 +775,22 @@ class MijiaService:
                     value = float(item["value"])
                 except (KeyError, TypeError, ValueError):
                     continue
-                if metric == "temperature":
-                    temps[did] = value
-                else:
-                    hums[did] = value
+                values.setdefault(did, {})[metric] = value
 
         for did in dids:
-            result[did] = format_metrics_text(temps.get(did), hums.get(did))
+            got = values.get(did, {})
+            # 副标题只拼用户要的那几项；温湿度是顺带读的，不进文案
+            wanted = (selections[did] if did in selections
+                      else list(_DEFAULT_METRICS))
+            shown = {name: got[name] for name in wanted if name in got}
+            result[did] = format_metrics_text(shown)
+
+        if climate_out is not None:
+            # 胶囊数据要覆盖两类设备：有副标题需求的，以及只为胶囊读的
+            for did in list(dids) + extra:
+                got = values.get(did, {})
+                climate_out[did] = {name: got[name]
+                                    for name in _DEFAULT_METRICS if name in got}
         return result
 
     def consumable_items(self) -> list[dict]:
@@ -979,23 +1038,33 @@ class MijiaService:
             return self._product_page_names[model]
         import requests
 
-        name = None
-        try:
-            # 产品页服务已基本不可用（普遍超时或 404），超时压短避免
-            # 每型号白等十秒；失败会按"无中文名"记忆，不再重试
-            r = requests.get(f"https://home.miot-spec.com/p/{model}", timeout=3,
-                             headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code == 200:
-                m = re.search(
+        def _fetch(path: str) -> str | None:
+            """取某个详情页里的商品名，任何异常都当没有。"""
+            try:
+                resp = requests.get(
+                    f"https://home.miot-spec.com/{path}/{model}", timeout=3,
+                    headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code != 200:
+                    return None
+                matched = re.search(
                     r'<script data-page="app" type="application/json">(.*?)</script>',
-                    r.text, re.S)
-                if m:
-                    product = json.loads(m.group(1)).get("props", {}).get("product", {})
-                    name = product.get("name") or None
-                    if name is not None and not any("一" <= ch <= "鿿" for ch in name):
-                        name = None  # 产品名也非中文，无回退价值
-        except Exception as exc:
-            logger.warning("产品页名称查询失败 %s: %s", model, exc)
+                    resp.text, re.S)
+                if not matched:
+                    return None
+                product = json.loads(matched.group(1)).get("props", {}).get("product", {})
+                return product.get("name") or None
+            except Exception as exc:
+                logger.warning("产品页名称查询失败 %s/%s: %s", path, model, exc)
+                return None
+
+        name = None
+        # 两个路径登记的信息并不一致：有的型号 /p/ 是 404 或超时，
+        # 但 /spec/ 里有商品名，所以前一个拿不到时补查一次
+        for path in ("p", "spec"):
+            candidate = _fetch(path)
+            if candidate and any("一" <= ch <= "鿿" for ch in candidate):
+                name = candidate
+                break
         self._product_page_names[model] = name
         if name:
             # 只把成功结果落盘：失败留给下次启动重试
@@ -1044,35 +1113,65 @@ class MijiaService:
         return result
 
 
-def format_metrics_text(temp, hum) -> str | None:
-    """温湿度展示文案（如 "28.3°C 60%"）；两项都无效时返回 None。
+# 卡片副标题默认显示的两项；插座的功率这类需求由用户自选覆盖
+_DEFAULT_METRICS = ("temperature", "relative-humidity")
 
-    卡片副标题与详情面板回读共用，避免量纲启发式两处漂移。
+# 属性名 -> 展示单位。规格里的 unit 字段大量为 null，不能依赖，
+# 这里按 SI 标准属性名兜底；未收录的属性只显示数值不带单位
+_UNIT_BY_PROP = {
+    "temperature": "°C",
+    "relative-humidity": "%",
+    "humidity": "%",
+    "battery-level": "%",
+    "power": "W",
+    "electric-power": "W",
+    "voltage": "V",
+    "electric-current": "A",
+    "power-consumption": "kWh",
+    "pm2.5-density": "μg/m³",
+    "co2-density": "ppm",
+    "illumination": "lx",
+}
+
+
+def format_metrics_text(values: dict[str, float]) -> str | None:
+    """把若干属性读数拼成卡片副标题文案；全无效时返回 None。
+
+    values 的键是属性名，插入顺序即展示顺序。卡片副标题与详情面板
+    回读共用，避免量纲启发式两处漂移。
     """
     parts: list[str] = []
-    if temp is not None:
+    for name, value in values.items():
         try:
-            parts.append(_format_temp(float(temp)))
+            parts.append(format_metric(name, float(value)))
         except (TypeError, ValueError):
-            pass
-    if hum is not None:
-        try:
-            parts.append(_format_humidity(float(hum)))
-        except (TypeError, ValueError):
-            pass
+            continue
     return " ".join(parts) if parts else None
 
 
-def _format_temp(value: float) -> str:
-    # SI 规范里 temperature 常以 0.1 摄氏度步进的整数存储（283 = 28.3），
-    # 按合理室温范围启发式区分真实值与 0.1 度整数值
-    if abs(value) > 60:
-        value /= 10
-    return f"{value:.1f}°C"
+def format_metric(name: str, value: float) -> str:
+    """按属性名决定量纲换算与小数位。
 
-
-def _format_humidity(value: float) -> str:
-    # 湿度同样存在 0.1% 步进的整数存储（683 = 68.3%）
-    if value > 100:
-        value /= 10
-    return f"{value:.0f}%"
+    SI 规范里温度、湿度常用 0.1 步进的整数存储（283 = 28.3°C、
+    683 = 68.3%），超出合理范围时按十分之一还原；功率这类量级
+    差异大的直接保留一位小数。
+    """
+    if name == "temperature":
+        if abs(value) > 60:
+            value /= 10
+        return f"{value:.1f}°C"
+    if name in ("relative-humidity", "humidity"):
+        if value > 100:
+            value /= 10
+        return f"{value:.0f}%"
+    if name == "battery-level":
+        return f"{round(value)}%"
+    if name in ("power", "electric-power"):
+        return f"{value:.1f}W"
+    if name == "power-consumption":
+        return f"{value:.2f}kWh"
+    unit = _UNIT_BY_PROP.get(name, "")
+    if not unit:
+        return f"{value:g}"
+    # 带单位的整数量纲（电压、电流等）保留一位小数足够
+    return f"{value:.1f}{unit}"

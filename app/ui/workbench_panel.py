@@ -79,6 +79,7 @@ class _SpinCircle(QWidget):
 
 class WorkbenchPanel(QWidget):
     metrics_updated = Signal(str, str)
+    metrics_config_changed = Signal(str)  # noqa: N815 did，卡片外显改过
     name_changed = Signal(str)  # did，主界面据此刷新卡片与托盘
 
     def __init__(self, service: MijiaService, jobs, parent=None):
@@ -136,6 +137,7 @@ class WorkbenchPanel(QWidget):
         self._rename_btn.clicked.connect(self._rename_device)
         self._rename_btn.hide()
         title_row.addWidget(self._rename_btn)
+
         # 自定义名称的标记：只在用户改过名时出现，提示当前显示的不是云端名
         self._custom_badge = QLabel("自定义名称")
         self._custom_badge.setObjectName("customNameBadge")
@@ -154,6 +156,18 @@ class WorkbenchPanel(QWidget):
         self._refresh_btn.clicked.connect(lambda: self._reload_readings(force=True))
         self._refresh_btn.hide()
         header.addWidget(self._refresh_btn)
+        # 卡片外显紧挨刷新：两者都影响"看到什么数值"，放在一起符合直觉
+        self._metrics_btn = QPushButton("外显值设置")
+        # 宽度按文字自适应并留出左右内边距：固定高度但不定宽时，
+        # 样式里的 padding 不参与宽度计算，文字会顶到描边上
+        self._metrics_btn.setFixedHeight(32)
+        self._metrics_btn.setMinimumWidth(
+            self._metrics_btn.fontMetrics().horizontalAdvance("外显值设置") + 30)
+        self._metrics_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._metrics_btn.setToolTip("设置设备卡片副标题显示的值")
+        self._metrics_btn.clicked.connect(self._pick_metrics)
+        self._metrics_btn.hide()
+        header.addWidget(self._metrics_btn)
         self._edit_btn = QPushButton("编辑功能")
         self._edit_btn.setFixedSize(80, 32)
         self._edit_btn.setCursor(Qt.PointingHandCursor)
@@ -284,6 +298,7 @@ class WorkbenchPanel(QWidget):
         self._load_hint.setText("正在获取设备信息…")
         self._update_offline_bar()
         self._refresh_btn.hide()
+        self._metrics_btn.hide()
         self._edit_btn.hide()
         self._loading.show()
         self._jobs.submit(
@@ -318,6 +333,7 @@ class WorkbenchPanel(QWidget):
         self._active_keys = keys
         self._render_workbench()
         self._refresh_btn.show()
+        self._metrics_btn.show()
         self._edit_btn.show()
 
     def _apply_display_name(self) -> None:
@@ -335,6 +351,35 @@ class WorkbenchPanel(QWidget):
         self._title_label.setText(shown)
         self._title_label.setToolTip(full)
         self._custom_badge.setVisible(bool(custom))
+
+    def _pick_metrics(self) -> None:
+        """选择这张设备卡片副标题要显示哪些数值属性。"""
+        if self._detail is None or not self._current_did:
+            return
+        from app.core import settings_store
+        from app.ui.metrics_pick_dialog import MetricsPickDialog
+
+        saved = settings_store.get_metrics_selection()
+        # 键不存在表示从未设置，传 None 让对话框预勾默认温湿度；
+        # 空列表表示用户已明确选择不外显，保持全空
+        current = saved.get(self._current_did)
+        dialog = MetricsPickDialog(self._detail.props, current, self)
+        accepted = dialog.exec() == MetricsPickDialog.DialogCode.Accepted
+        props = dialog.result_props()
+        restored = dialog.restored_default()
+        untouched = dialog.untouched_default()
+        dialog.deleteLater()
+        if not accepted:
+            return
+        if restored:
+            settings_store.clear_metrics_selection(self._current_did)
+        elif untouched:
+            # 原样没动：不写配置，保持默认语义
+            pass
+        else:
+            # 空列表有意义：用户明确选择了不外显
+            settings_store.set_metrics_selection(self._current_did, props)
+        self.metrics_config_changed.emit(self._current_did)
 
     def _rename_device(self) -> None:
         """打开改名对话框；留空或点恢复默认都会还原云端原名。"""
@@ -682,18 +727,21 @@ class WorkbenchPanel(QWidget):
         styles = (
             f"QPushButton {{ background: {SiColors.CTRL_BG};"
             f" border: 1px solid {SiColors.CTRL_BORDER}; border-radius: 8px;"
-            f" color: {SiColors.TEXT_PRIMARY}; font-size: 9pt; }}"
+            f" color: {SiColors.TEXT_PRIMARY}; font-size: 9pt; padding: 0 12px; }}"
             f"QPushButton:hover {{ background: {SiColors.CTRL_BG_HOVER}; }}"
             f"QPushButton[active=\"true\"] {{ background: {SiColors.THEME};"
             f" border-color: {SiColors.THEME};"
             f" color: {SiColors.ON_THEME_TEXT}; }}")
         self._refresh_btn.setStyleSheet(styles)
+        self._metrics_btn.setStyleSheet(styles)
         self._edit_btn.setStyleSheet(styles)
-        # 改名按钮贴着小标题，做成无底色的图标按钮，避免和右侧操作按钮抢视觉
-        self._rename_btn.setStyleSheet(
+        # 改名按钮贴着小标题，做成无底色的图标按钮，避免和右侧
+        # 操作按钮抢视觉
+        icon_btn_qss = (
             "QPushButton { background: transparent; border: none;"
             " border-radius: 6px; }"
             f"QPushButton:hover {{ background: {SiColors.CTRL_BG_HOVER}; }}")
+        self._rename_btn.setStyleSheet(icon_btn_qss)
         self._rename_btn.setIcon(
             qta.icon("mdi.pencil", color=SiColors.TEXT_SECONDARY))
         self._custom_badge.setStyleSheet(
@@ -703,7 +751,7 @@ class WorkbenchPanel(QWidget):
     def retheme(self) -> None:
         """主题切换：刷新头部按钮与已加载的功能区块（内联样式冻结）。"""
         self._apply_header_button_styles()
-        for btn in (self._refresh_btn, self._edit_btn):
+        for btn in (self._refresh_btn, self._metrics_btn, self._edit_btn):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
         if self._detail is not None:
@@ -900,14 +948,21 @@ class WorkbenchPanel(QWidget):
         self._emit_metrics(values)
 
     def _emit_metrics(self, values: dict[str, Any]) -> None:
-        temp = values.get("temperature")
-        hum = values.get("relative-humidity")
-        if hum is None:
-            hum = values.get("humidity")
-        if temp is None and hum is None:
+        # 只回传温湿度：详情面板的实时回读取的是这两项，卡片副标题
+        # 若被用户改成功率等属性，由主窗口按自己的选择另行拉取
+        picked: dict[str, float] = {}
+        for name in ("temperature", "relative-humidity", "humidity"):
+            value = values.get(name)
+            if value is None:
+                continue
+            try:
+                picked[name] = float(value)
+            except (TypeError, ValueError):
+                continue
+        if not picked:
             return
         # 格式化与卡片副标题共用同一实现（service 层），避免两处启发式漂移
-        text = format_metrics_text(temp, hum)
+        text = format_metrics_text(picked)
         if text and self._current_did:
             self.metrics_updated.emit(self._current_did, text)
 

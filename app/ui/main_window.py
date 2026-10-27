@@ -43,7 +43,7 @@ from app.core import icon_store, name_override_store, schedule_store, settings_s
 from app.core.jobs import PRIORITY_CONTROL, PRIORITY_IDLE, JobExecutor
 from app.core.models import DeviceInfo, SceneInfo, is_speaker
 from app.core.scheduler import Scheduler
-from app.core.service import MijiaService
+from app.core.service import MijiaService, format_metric
 from app.ui.board_manager import BoardManagerDialog
 from app.ui.device_card import DeviceCard
 from app.ui.device_dialog import DeviceDetailDialog
@@ -205,6 +205,9 @@ class MainWindow(QMainWindow):
         self._known_power: dict[str, bool | None] = {}
         # did -> 环境读数文案（温湿度），随轮询更新、随网格重建回填
         self._metrics: dict[str, str | None] = {}
+        # did -> {属性名: 原始数值}，目前只存温湿度：顶部环境胶囊要用
+        # 真实读数，不能解析被用户自定义过的副标题文案
+        self._climate: dict[str, dict[str, float]] = {}
         # 耗材明细（全屋口径）：不足项数大于 0 时显示提示胶囊
         self._consumables: list[dict] = []
         self._consumable_low = 0
@@ -341,6 +344,7 @@ class MainWindow(QMainWindow):
         self._refresh_btn.clicked.connect(self.load_devices)
         self._settings_btn = _IconButton("mdi.cog-outline", "设置", self)
         self._settings_btn.clicked.connect(self.show_settings)
+
         self._more_menu = QMenu()
         self._more_menu.addAction("托盘管理").triggered.connect(self.show_tray_manager)
         self._more_menu.addAction("定时任务").triggered.connect(self.show_schedules)
@@ -474,6 +478,7 @@ class MainWindow(QMainWindow):
             f"QMenu {{ background: {SiColors.CARD}; border: 1px solid {SiColors.BTN_HOVER}; border-radius: 8px; padding: 4px; }}"
             f"QMenu::item {{ color: {SiColors.TEXT_PRIMARY}; padding: 6px 24px 6px 12px; border-radius: 4px; }}"
             f"QMenu::item:selected {{ background: {SiColors.BTN_HOVER}; }}")
+
         for btn in (self._refresh_btn, self._settings_btn, self._more_btn):
             btn.retheme()
 
@@ -1465,18 +1470,21 @@ class MainWindow(QMainWindow):
         切到某个房间后自然变成该房间内的第一台，不需要额外聚合。
         开启数只统计当前范围内状态确认为开的设备。
         """
-        # 温度与湿度分开显示：取第一个能读到对应数值的设备
+        # 取第一个能读到温湿度的设备。这里读 _climate 里的原始值，
+        # 不能解析副标题文案：那可能已被改成显示功率，解析出来是错的
         temp_text = ""
         humidity_text = ""
         for device in subset:
-            value = self._metrics.get(device.did)
-            if not value:
+            values = self._climate.get(device.did)
+            if not values:
                 continue
-            temp, humidity = _split_metrics(value)
-            if not temp_text and temp:
-                temp_text = temp
-            if not humidity_text and humidity:
-                humidity_text = humidity
+            if not temp_text and "temperature" in values:
+                temp_text = format_metric("temperature", values["temperature"])
+            if not humidity_text:
+                for key in ("relative-humidity", "humidity"):
+                    if key in values:
+                        humidity_text = format_metric(key, values[key])
+                        break
             if temp_text and humidity_text:
                 break
         self._temp_pill.setText(temp_text)
@@ -1711,24 +1719,37 @@ class MainWindow(QMainWindow):
             panel.update_power(did, state)
 
     def _refresh_metrics(self) -> None:
-        """为无开关能力的可见设备批量拉温湿度读数（副标题展示）。
+        """批量拉取卡片副标题的读数。
 
-        有开关的设备副标题保持纯房间名；温湿度计这类设备读 SI 标准
-        temperature/humidity 属性，读数失败静默跳过。
+        默认只读「无开关能力」的设备（温湿度计这类），有开关的设备
+        副标题保持纯房间名。但用户如果给某台设备指定了外显属性
+        （插座改成功率），即使它有开关能力也要读，否则那个值永远
+        不会刷新。
         """
+        selections = settings_store.get_metrics_selection()
+        visible = self._visible_devices()
         dids = [
-            d.did for d in self._visible_devices()
-            if self._known_power.get(d.did) is None
+            d.did for d in visible
+            if self._known_power.get(d.did) is None or d.did in selections
         ]
         if not dids:
             return
+        # 温湿度原始值单独收集：环境胶囊固定展示它们，不能从被用户
+        # 改过的副标题文案里反推。候选集取整个可见范围，规格里没有
+        # 温湿度属性的会被服务层跳过，不会带来额外请求
+        climate: dict[str, dict[str, float]] = {}
+        candidates = [d.did for d in visible]
         self._jobs.submit(
-            lambda: self._service.read_metrics(dids),
-            on_success=self._apply_metrics,
-            on_error=lambda exc: logger.warning("拉取温湿度读数失败: %s", exc),
+            lambda: self._service.read_metrics(
+                dids, selections, climate, candidates),
+            on_success=lambda metrics: self._apply_metrics(metrics, climate),
+            on_error=lambda exc: logger.warning("拉取卡片读数失败: %s", exc),
         )
 
-    def _apply_metrics(self, metrics: dict[str, str | None]) -> None:
+    def _apply_metrics(self, metrics: dict[str, str | None],
+                       climate: dict[str, dict[str, float]] | None = None) -> None:
+        if climate is not None:
+            self._climate.update(climate)
         dirty = False
         for did, text in metrics.items():
             if text:
@@ -1739,7 +1760,8 @@ class MainWindow(QMainWindow):
                 self._metrics.pop(did, None)
                 dirty = True
             card = self._cards.get(did)
-            if card is not None:
+            # 卡片可能在读数回来的路上随网格重建销毁，先确认对象还在
+            if card is not None and shiboken6.isValid(card):
                 card.set_metrics(text)
         if dirty and self._all_devices:
             device_cache.save(self._all_devices, self._known_power, self._metrics)
@@ -1784,9 +1806,29 @@ class MainWindow(QMainWindow):
         if self._all_devices:
             device_cache.save(self._all_devices, self._known_power, self._metrics)
 
+    def _on_metrics_config_changed(self, did: str) -> None:
+        """详情页改了卡片外显：清掉旧文案并按新选择重读一次。"""
+        if self._metrics.pop(did, None) is not None:
+            card = self._cards.get(did)
+            if card is not None and shiboken6.isValid(card):
+                card.set_metrics(None)
+            # 缓存里也要同步清掉，否则下次启动会先把旧文案贴回卡片
+            if self._all_devices:
+                device_cache.save(
+                    self._all_devices, self._known_power, self._metrics)
+        self._refresh_metrics()
+
     def _on_detail_metrics(self, did: str, text: str) -> None:
-        """详情页回读到温湿度后立即回写卡片与缓存（手动刷新路径）。"""
+        """详情页回读到温湿度后立即回写卡片与缓存（手动刷新路径）。
+
+        用户给这台设备挑过别的外显属性（比如功率）时不回写：详情页
+        始终只读温湿度，写回去会把卡片上的自定义值覆盖掉。
+        """
         if not text:
+            return
+        # 用 in 判断而不是取值的真假：用户选择"不外显"时值是空列表，
+        # 那也是自定义设置，不该被详情页回传的温湿度覆盖
+        if did in settings_store.get_metrics_selection():
             return
         if self._metrics.get(did) == text:
             return
@@ -1931,10 +1973,11 @@ class MainWindow(QMainWindow):
     def _make_tab_sort_button(self) -> QPushButton:
         """标签行最右端的排序入口。"""
         btn = QPushButton()
-        btn.setFixedSize(28, 28)
+        # 这个入口嵌在标签行右侧、周围没有别的控件衬托，做太小很难注意到
+        btn.setFixedSize(34, 34)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip("调整标签顺序")
-        btn.setIconSize(QSize(18, 18))
+        btn.setIconSize(QSize(26, 26))
         btn.setIcon(qta.icon("mdi.sort-variant", color=SiColors.TEXT_SECONDARY))
         btn.setStyleSheet(
             "QPushButton { background: transparent; border: none;"
@@ -2316,11 +2359,14 @@ class MainWindow(QMainWindow):
         # 详情内取到温湿度后直接回写卡片与缓存（手动刷新的即时反馈）
         dialog.panel.metrics_updated.connect(self._on_detail_metrics)
         dialog.panel.name_changed.connect(self._on_device_name_changed)
+        dialog.panel.metrics_config_changed.connect(self._on_metrics_config_changed)
         dialog.load()
         dialog.exec()
         # 面板可能随关闭流程提前释放，断开信号前先确认对象还在
         if shiboken6.isValid(dialog.panel):
             dialog.panel.name_changed.disconnect(self._on_device_name_changed)
+            dialog.panel.metrics_config_changed.disconnect(
+                self._on_metrics_config_changed)
             dialog.panel.metrics_updated.disconnect(self._on_detail_metrics)
         dialog.deleteLater()
         # 详情期间可能在面板里改过开关，关闭后读一次回填卡片；
