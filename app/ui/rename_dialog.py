@@ -7,7 +7,7 @@
 其余界面风格割裂；「恢复默认」直接清掉本地覆盖，不必手动清空输入。
 """
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -113,8 +113,25 @@ class RenameDeviceDialog(OverlayDialog):
 
     # ---------- 定位 ----------
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # 先把透明度按回 0：紧接着的几何重排会打断基类启动的淡入，
+        # 等窗口铺满父窗口后再统一淡入
+        self.setWindowOpacity(0.0)
+        QTimer.singleShot(0, self._fill_and_place)
+
+    def _fill_and_place(self) -> None:
+        import shiboken6
+
+        if not shiboken6.isValid(self):
+            return
+        self._fill_parent_window()
+        self._place_overlay()
+        self._fade_in()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._place_overlay()
         x = (self.width() - self._panel.width()) // 2
         y = (self.height() - self._panel.height()) // 2
         self._panel.move(x, y)

@@ -325,7 +325,15 @@ class WorkbenchPanel(QWidget):
         if self._detail is None:
             return
         custom = name_override_store.get(self._current_did or "")
-        self._title_label.setText(custom or self._detail.name)
+        full = custom or self._detail.name
+        # 标题栏空间有限，超长名字省略显示，完整内容放 tooltip。
+        # 可用宽度按面板宽度推算（右侧还有刷新/编辑按钮），窗口很窄
+        # 时不能再用固定值，否则文字会溢出到按钮下面。
+        avail = max(120, min(520, self.width() - 220))
+        shown = self._title_label.fontMetrics().elidedText(
+            full, Qt.TextElideMode.ElideRight, avail)
+        self._title_label.setText(shown)
+        self._title_label.setToolTip(full)
         self._custom_badge.setVisible(bool(custom))
 
     def _rename_device(self) -> None:
