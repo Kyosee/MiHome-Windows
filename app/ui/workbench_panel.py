@@ -10,6 +10,8 @@
 import shiboken6
 from typing import Any, Callable
 
+import qtawesome as qta
+
 from PySide6.QtCore import QParallelAnimationGroup, QPropertyAnimation, QTimer, Qt, Signal
 from PySide6.QtCore import QEasingCurve
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
@@ -23,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core import workbench_store
+from app.core import name_override_store, workbench_store
 from app.core.models import DeviceDetail, DeviceInfo, PropInfo
 from app.core.service import MijiaService, format_metrics_text
 from app.ui.add_drawer import AddDrawer
@@ -77,6 +79,7 @@ class _SpinCircle(QWidget):
 
 class WorkbenchPanel(QWidget):
     metrics_updated = Signal(str, str)
+    name_changed = Signal(str)  # did，主界面据此刷新卡片与托盘
 
     def __init__(self, service: MijiaService, jobs, parent=None):
         super().__init__(parent)
@@ -120,11 +123,28 @@ class WorkbenchPanel(QWidget):
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
         self._title_label = QLabel("未选择设备")
         self._title_label.setObjectName("panelTitle")
+        title_row.addWidget(self._title_label)
+        # 改名按钮贴着名字放：离得远时用户不容易注意到这个入口
+        self._rename_btn = QPushButton()
+        self._rename_btn.setFixedSize(26, 26)
+        self._rename_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rename_btn.setToolTip("修改设备名称")
+        self._rename_btn.clicked.connect(self._rename_device)
+        self._rename_btn.hide()
+        title_row.addWidget(self._rename_btn)
+        # 自定义名称的标记：只在用户改过名时出现，提示当前显示的不是云端名
+        self._custom_badge = QLabel("自定义名称")
+        self._custom_badge.setObjectName("customNameBadge")
+        self._custom_badge.hide()
+        title_row.addWidget(self._custom_badge)
+        title_row.addStretch(1)
+        title_box.addLayout(title_row)
         self._model_label = QLabel("选择一台设备开始控制")
         self._model_label.setObjectName("panelSubtitle")
-        title_box.addWidget(self._title_label)
         title_box.addWidget(self._model_label)
         header.addLayout(title_box)
         header.addStretch(1)
@@ -257,6 +277,8 @@ class WorkbenchPanel(QWidget):
         self._model_label.setText(room)
         self._title_label.hide()
         self._model_label.hide()
+        self._custom_badge.hide()
+        self._rename_btn.hide()
         self._load_name.setText(name)
         self._load_room.setText(room)
         self._load_hint.setText("正在获取设备信息…")
@@ -275,10 +297,11 @@ class WorkbenchPanel(QWidget):
             return
         self._loading.hide()
         self._detail = detail
-        self._title_label.setText(detail.name)
         self._model_label.setText(detail.model)
         self._title_label.show()
         self._model_label.show()
+        self._rename_btn.show()
+        self._apply_display_name()
         self._build_module_defs(detail)
         keys = workbench_store.load(detail.did)
         # 预置开关：首次进入且存在可写开关时自动加入
@@ -296,6 +319,34 @@ class WorkbenchPanel(QWidget):
         self._render_workbench()
         self._refresh_btn.show()
         self._edit_btn.show()
+
+    def _apply_display_name(self) -> None:
+        """按自定义名称的优先级刷新标题与提示标记。"""
+        if self._detail is None:
+            return
+        custom = name_override_store.get(self._current_did or "")
+        self._title_label.setText(custom or self._detail.name)
+        self._custom_badge.setVisible(bool(custom))
+
+    def _rename_device(self) -> None:
+        """打开改名对话框；留空或点恢复默认都会还原云端原名。"""
+        if not self._current_did or self._detail is None:
+            return
+        from app.ui.rename_dialog import RenameDeviceDialog
+
+        current = name_override_store.get(self._current_did) or self._detail.name
+        dialog = RenameDeviceDialog(current, self._detail.name, self)
+        accepted = dialog.exec() == RenameDeviceDialog.DialogCode.Accepted
+        restore = dialog.restoring()
+        value = dialog.value()
+        dialog.deleteLater()
+        if not accepted:
+            return
+        name_override_store.set_name(
+            self._current_did, "" if restore else value)
+        self._apply_display_name()
+        # 主界面卡片、托盘、挂件都按设备对象里的名字展示，需要同步刷新
+        self.name_changed.emit(self._current_did)
 
     def _default_keys(self) -> list[str]:
         # 优先选择独立的 on 开关（最常用的控制方式）
@@ -529,6 +580,8 @@ class WorkbenchPanel(QWidget):
         self._footer_add_btn.hide()
         self._body.hide()
         self._refresh_btn.hide()
+        self._rename_btn.hide()
+        self._custom_badge.hide()
 
     def _clear_grid(self) -> None:
         # 重排动画进行中切换设备时，先停掉动画：动画目标 wrapper 随即
@@ -628,6 +681,16 @@ class WorkbenchPanel(QWidget):
             f" color: {SiColors.ON_THEME_TEXT}; }}")
         self._refresh_btn.setStyleSheet(styles)
         self._edit_btn.setStyleSheet(styles)
+        # 改名按钮贴着小标题，做成无底色的图标按钮，避免和右侧操作按钮抢视觉
+        self._rename_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " border-radius: 6px; }"
+            f"QPushButton:hover {{ background: {SiColors.CTRL_BG_HOVER}; }}")
+        self._rename_btn.setIcon(
+            qta.icon("mdi.pencil", color=SiColors.TEXT_SECONDARY))
+        self._custom_badge.setStyleSheet(
+            f"color: {SiColors.THEME}; background: {SiColors.SURFACE};"
+            " border-radius: 6px; padding: 1px 8px; font-size: 8.5pt;")
 
     def retheme(self) -> None:
         """主题切换：刷新头部按钮与已加载的功能区块（内联样式冻结）。"""

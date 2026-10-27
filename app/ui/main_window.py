@@ -39,7 +39,7 @@ from app.siui.components.button import SiToggleButtonRefactor
 import qtawesome as qta
 
 from app.core import cache as device_cache
-from app.core import icon_store, schedule_store
+from app.core import icon_store, name_override_store, schedule_store
 from app.core.jobs import PRIORITY_CONTROL, PRIORITY_IDLE, JobExecutor
 from app.core.models import DeviceInfo, SceneInfo, is_speaker
 from app.core.scheduler import Scheduler
@@ -938,6 +938,7 @@ class MainWindow(QMainWindow):
 
     def _apply_devices(self, devices: list[DeviceInfo]) -> None:
         self._all_devices = devices
+        self._apply_custom_names()
         homes = sorted(
             {d.home_name for d in devices},
             key=lambda h: (h == "未知", h),
@@ -1003,6 +1004,18 @@ class MainWindow(QMainWindow):
         for card in self._cards.values():
             if card.device.model == model:
                 card.set_icon(Path(path))
+
+    def _apply_custom_names(self) -> None:
+        """用本地自定义名称覆盖设备显示名。
+
+        云端名单独存一份到 cloud_name，用户恢复默认时直接取回，
+        不必等下一次刷新设备列表。
+        """
+        overrides = name_override_store.load_all()
+        for device in self._all_devices:
+            if not device.cloud_name:
+                device.cloud_name = device.name
+            device.name = overrides.get(device.did) or device.cloud_name
 
     def _maybe_localize_names(self) -> None:
         """未改名英文设备用中文名替换显示名（两个来源按序兜底）。
@@ -1708,6 +1721,19 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _on_device_name_changed(self, did: str) -> None:
+        """详情页改了设备名：同步设备对象并刷新所有展示入口。"""
+        device = next((d for d in self._all_devices if d.did == did), None)
+        if device is None:
+            return
+        custom = name_override_store.get(did)
+        device.name = custom or device.cloud_name or device.name
+        self._rebuild_grid()
+        self._update_tray_devices()
+        self._update_board_devices()
+        if self._all_devices:
+            device_cache.save(self._all_devices, self._known_power, self._metrics)
+
     def _on_detail_metrics(self, did: str, text: str) -> None:
         """详情页回读到温湿度后立即回写卡片与缓存（手动刷新路径）。"""
         if not text:
@@ -2174,8 +2200,10 @@ class MainWindow(QMainWindow):
         dialog = DeviceDetailDialog(self._service, self._jobs, device, self)
         # 详情内取到温湿度后直接回写卡片与缓存（手动刷新的即时反馈）
         dialog.panel.metrics_updated.connect(self._on_detail_metrics)
+        dialog.panel.name_changed.connect(self._on_device_name_changed)
         dialog.load()
         dialog.exec()
+        dialog.panel.name_changed.disconnect(self._on_device_name_changed)
         dialog.panel.metrics_updated.disconnect(self._on_detail_metrics)
         dialog.deleteLater()
         # 详情期间可能在面板里改过开关，关闭后读一次回填卡片；

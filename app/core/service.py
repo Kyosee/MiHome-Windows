@@ -79,9 +79,12 @@ def _normalize_api_locale(api) -> None:
         normalized = "zh_CN"
     api.locale = normalized
     # 不比较新旧值：历史会话可能把错误语言拼进 UA 并留在认证文件里，
-    # 每次启动都重建一次请求头，才能保证服务端拿到正确语言
+    # 每次启动都重建一次请求头，才能保证服务端拿到正确语言。
+    # 注意必须立刻读一次 user_agent 让它重新生成：available 会检查
+    # auth_data 里有没有 ua 字段，pop 掉不补会被判成未登录。
     try:
         api.auth_data.pop("ua", None)
+        _ = api.user_agent
     except Exception:
         pass
 
