@@ -3,7 +3,7 @@
 # Copyright (C) 2026 MiHome-Windows contributors
 """系统托盘控制器：常驻图标 + 菜单 + 快捷窗口编排。"""
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, QTimer
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
@@ -11,6 +11,11 @@ from app.core.jobs import JobExecutor
 from app.core.models import DeviceInfo
 from app.core.service import MijiaService
 from app.ui.tray.quick_window import TrayQuickWindow
+
+# 单击托盘后等这么久再弹快捷窗口，给双击留出识别窗口。
+# 不用系统的双击间隔（默认 500ms）：那段时间里单击毫无反应，
+# 手感上像卡住了
+_SINGLE_CLICK_DELAY_MS = 200
 
 
 class TrayController:
@@ -34,6 +39,15 @@ class TrayController:
         self._tray = QSystemTrayIcon(_tray_icon, main_window)
         self._tray.setToolTip("米家 - MiHome for Windows")
         self._tray.activated.connect(self._on_activated)
+        # 点击瞬间快捷窗口是否已呼出，决定这次单击是开还是关。
+        # 必须在点击当下取快照：托盘窗口失焦后会自动隐藏，等延迟
+        # 结束再判断就永远是"不可见"，于是只能开不能关
+        self._quick_was_visible = False
+        # 单击要推迟执行，给双击留出识别窗口。双击时系统会先发一次
+        # 单击事件，若立刻响应，快捷窗口会闪一下再被主窗口盖住
+        self._click_timer = QTimer(main_window)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self._toggle_quick)
 
         menu = QMenu()
         menu.setObjectName("appMenu")
@@ -114,28 +128,40 @@ class TrayController:
         self._quick.manage_requested.emit()
 
     def _on_activated(self, reason) -> None:
-        if reason != QSystemTrayIcon.ActivationReason.Trigger:  # 仅左键单击
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            # 双击直接开主窗口：单击的延迟任务要取消掉，否则快捷窗口
+            # 会在主窗口出现后又弹出来
+            self._click_timer.stop()
+            self._show_main()
             return
+        if reason != QSystemTrayIcon.ActivationReason.Trigger:
+            return
+        self._quick_was_visible = self._quick.is_explicitly_visible()
+        self._click_timer.start(_SINGLE_CLICK_DELAY_MS)
+
+    def _toggle_quick(self) -> None:
+        """左键单击托盘：按点击瞬间的状态决定呼出还是收起。"""
         quick = self._quick
-        # 正在播放呼出/隐藏动画时，终止旧动画并以带动画方式切换，避免直接 hide 丢失关闭动画
+        # 正在播放呼出/隐藏动画时先终止旧动画，避免直接 hide 丢失关闭动画
         if quick.is_animating():
             quick.abort_toggle_animation()
-            if quick.isVisible() or quick.is_explicitly_visible():
-                quick.hide_animated()
-            else:
-                quick.show_near_tray()
-            return
-        if quick.isVisible():
+        if self._quick_was_visible:
             quick.hide_animated()
         else:
             quick.show_near_tray()
 
     def _show_main(self) -> None:
+        # 快捷窗口是置顶的 Tool 窗口，主窗口起来后它会浮在上面挡视线，
+        # 各入口（右键菜单、快捷窗口内的按钮、双击托盘）都先收起它
+        if self._quick.isVisible() or self._quick.is_explicitly_visible():
+            self._quick.hide_animated()
+        # 先解除最小化再显示：show() 之后再判断状态可能已经变了，
+        # 最小化的窗口会停在任务栏里不动
+        if self._main.isMinimized():
+            self._main.showNormal()
         self._main.show()
         self._main.raise_()
         self._main.activateWindow()
-        if self._main.isMinimized():
-            self._main.showNormal()
 
     def _quit(self) -> None:
         self._tray.hide()
