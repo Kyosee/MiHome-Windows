@@ -13,8 +13,6 @@
 
 from pathlib import Path
 
-from pathlib import Path
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPixmap
 from PySide6.QtWidgets import (
@@ -148,11 +146,18 @@ class DeviceCard(SiRowCard):
         rest = text[index:]
         if not rest:
             return first
+        # 第二行先尽量填满，不预留省略号：能完整放下就不该出现省略号，
+        # 否则明明还有余量也会被提前截断
         second = ""
-        while rest and metrics.horizontalAdvance(
-                second + rest[0] + "…") <= width:
+        while rest and metrics.horizontalAdvance(second + rest[0]) <= width:
             second += rest[0]
             rest = rest[1:]
+        if not rest:
+            return f"{first}\n{second}"
+        # 确实放不下才加省略号，并回退字符给省略号腾出宽度
+        while second and metrics.horizontalAdvance(second + "…") > width:
+            rest = second[-1] + rest
+            second = second[:-1]
         return f"{first}\n{second}…"
 
     def _update_elided_name(self) -> None:
