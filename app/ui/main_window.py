@@ -494,6 +494,17 @@ class MainWindow(QMainWindow):
         if self._tray is not None:
             self._tray.apply_system_icon_theme(scheme)
 
+    def apply_tray_icon_color(self, choice: str | None = None) -> None:
+        """设置页改了托盘图标颜色：立即按当前系统深浅重画一次。
+
+        choice 是设置页刚点选、还没保存的颜色；传 None 表示按已保存
+        的设置刷新（例如取消时还原）。
+        """
+        if self._tray is None:
+            return
+        self._tray.apply_system_icon_theme(
+            self._theme_ctrl.system_scheme(), choice)
+
     def _on_theme_changed(self, theme: str) -> None:
         """主题切换广播：重建可重建结构并刷新固定件。"""
         self._reapply_chrome_styles()

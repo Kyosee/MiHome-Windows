@@ -3,8 +3,15 @@
 # Copyright (C) 2026 MiHome-Windows contributors
 """系统托盘控制器：常驻图标 + 菜单 + 快捷窗口编排。"""
 
-from PySide6.QtCore import QSize, QTimer
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from app.core.jobs import JobExecutor
@@ -16,6 +23,44 @@ from app.ui.tray.quick_window import TrayQuickWindow
 # 不用系统的双击间隔（默认 500ms）：那段时间里单击毫无反应，
 # 手感上像卡住了
 _SINGLE_CLICK_DELAY_MS = 200
+
+
+def _plain_icon(path: str) -> QIcon:
+    """按多尺寸装载原始图标，保证任务栏与高 DPI 下都清晰。"""
+    base = QPixmap(path)
+    if base.isNull():
+        return QIcon()
+    icon = QIcon()
+    for size in (16, 32, 48):
+        icon.addPixmap(base.scaled(
+            size, size, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+    return icon
+
+
+def _tinted_icon(path: str, color: str) -> QIcon:
+    """把单色图形的像素整体换成指定颜色，保留原有透明度轮廓。
+
+    托盘图标是纯白房子，直接用它当蒙版染色，就不必为每种颜色
+    各准备一套图片资源。
+    """
+    base = QPixmap(path)
+    if base.isNull():
+        # 资源缺失时返回空图标，让任务栏留空总比让程序崩掉好
+        return QIcon()
+    tinted = QPixmap(base.size())
+    tinted.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(tinted)
+    painter.drawPixmap(0, 0, base)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(tinted.rect(), QColor(color))
+    painter.end()
+    icon = QIcon(tinted)
+    for size in (16, 32, 48):
+        icon.addPixmap(tinted.scaled(
+            size, size, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+    return icon
 
 
 class TrayController:
@@ -89,31 +134,39 @@ class TrayController:
         # 托盘图标常驻，无需可用性检查也尝试显示
         self._tray.show()
         # 托盘图标跟系统配色（任务栏底色由系统决定），与应用主题设置无关
-        from PySide6.QtGui import QGuiApplication
         self.apply_system_icon_theme(
             QGuiApplication.styleHints().colorScheme())
 
-    def apply_system_icon_theme(self, scheme) -> None:
-        """按系统配色切换托盘图标：浅色任务栏用深色图形，反之亦然。
+    def apply_system_icon_theme(self, scheme, choice: str | None = None) -> None:
+        """刷新托盘图标：按用户设置的颜色，默认跟随任务栏深浅。
 
         scheme 接受 Qt.ColorScheme 或 \"dark\"/\"light\" 字符串。
+        choice 用于设置页的即时预览：此刻选择还没落盘，直接传进来
+        才能立刻看到效果；不传则读已保存的设置。
         """
-        from PySide6.QtCore import Qt
-
         if isinstance(scheme, str):
             is_light = scheme == "light"
         else:
             is_light = scheme == Qt.ColorScheme.Light
-        if is_light:
-            icon_file = "app/ui/tray_icon_light.png"
+        from app.core import settings_store
+
+        if choice is None:
+            choice = settings_store.get_tray_icon_color()
+        if choice == "system":
+            # 浅色任务栏配深色图形，反之亦然
+            icon_file = ("app/ui/tray_icon_light.png" if is_light
+                         else "app/ui/tray_icon.png")
+            color = None
         else:
+            # 固定颜色统一以白色图形为底再染色，避免两套底图颜色不一致；
+            # 自定义色直接就是 #rrggbb，预设名则查表换算
             icon_file = "app/ui/tray_icon.png"
+            color = (choice if choice.startswith("#")
+                     else settings_store.TRAY_ICON_COLORS.get(choice, "#ffffff"))
         from app import resource_path
         path = str(resource_path(icon_file))
-        icon = QIcon(path)
-        icon.addFile(path, QSize(16, 16))
-        icon.addFile(path, QSize(32, 32))
-        icon.addFile(path, QSize(48, 48))
+        icon = (_tinted_icon(path, color) if color
+                else _plain_icon(path))
         self._tray.setIcon(icon)
 
     def _create_quick_window(self) -> None:

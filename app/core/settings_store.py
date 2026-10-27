@@ -7,6 +7,7 @@
 保存用户在设置界面中调整的偏好。
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -41,6 +42,8 @@ _DEFAULTS: dict = {
     # did -> 卡片副标题要显示的属性名列表（最多两个）。键不存在表示用
     # 默认温湿度；值恰好是空列表表示用户明确选择不外显，两者语义不同
     "metrics_selection": {},
+    # 托盘图标颜色：system 跟随任务栏深浅，其余为固定色
+    "tray_icon_color": "system",
 }
 
 
@@ -56,6 +59,18 @@ def _read_raw() -> dict:
 
 def _write_raw(raw: dict) -> None:
     _json_store.write_json(_json_store.data_file(_FILENAME), raw)
+
+
+# 托盘图标可选颜色与色值，system 表示跟随任务栏深浅。
+# 色值集中在这里：界面色块和托盘染色都从这里取，避免两处各存一份
+TRAY_ICON_COLORS: dict[str, str] = {
+    "black": "#1a1a1a",
+    "white": "#ffffff",
+    "green": "#3dbba4",
+}
+_TRAY_ICON_CHOICES = ("system",) + tuple(TRAY_ICON_COLORS)
+# 自定义颜色的存储格式，与主题色一致（小写 #rrggbb）
+_HEX_COLOR_RE = re.compile(r"#[0-9a-f]{6}")
 
 
 def get_metrics_selection() -> dict[str, list[str]]:
@@ -100,6 +115,34 @@ def clear_metrics_selection(did: str) -> None:
     if current.pop(did, None) is not None:
         raw["metrics_selection"] = current
         _write_raw(raw)
+
+
+def _normalize_tray_color(value: str) -> str:
+    """把用户值规整成内部形式：预设名原样，十六进制统一小写。
+
+    取色板返回的本来就是小写，这里再做一次是为了兼容手动编辑过
+    设置文件、或别处传入大写色值的情况。不认识的值退回 system。
+    """
+    if value in _TRAY_ICON_CHOICES:
+        return value
+    lowered = value.lower()
+    if _HEX_COLOR_RE.fullmatch(lowered):
+        return lowered
+    return "system"
+
+
+def get_tray_icon_color() -> str:
+    """托盘图标颜色：system / black / white / green，或自定义 #rrggbb。"""
+    value = _read_raw().get("tray_icon_color")
+    return _normalize_tray_color(value) if isinstance(value, str) else "system"
+
+
+def set_tray_icon_color(value: str) -> None:
+    """写入托盘图标颜色；不认识的值按 system 处理，避免存脏数据。"""
+    raw = _read_raw()
+    raw["tray_icon_color"] = (_normalize_tray_color(value)
+                              if isinstance(value, str) else "system")
+    _write_raw(raw)
 
 
 def get_default_tab() -> str:
