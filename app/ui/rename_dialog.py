@@ -123,7 +123,9 @@ class RenameDeviceDialog(OverlayDialog):
     def _fill_and_place(self) -> None:
         import shiboken6
 
-        if not shiboken6.isValid(self):
+        # 对话框可能在延迟回调到达前就开始关闭，此时再淡入会和
+        # 淡出动画抢同一个透明度属性
+        if not shiboken6.isValid(self) or self._closing:
             return
         self._fill_parent_window()
         self._place_overlay()

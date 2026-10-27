@@ -1722,13 +1722,21 @@ class MainWindow(QMainWindow):
                 pass
 
     def _on_device_name_changed(self, did: str) -> None:
-        """详情页改了设备名：同步设备对象并刷新所有展示入口。"""
+        """详情页改了设备名：同步设备对象并刷新所有展示入口。
+
+        这里只改对应卡片的标题文字，不重建整个网格：改名信号来自
+        详情页的信号栈，此刻删卡片会让正在处理点击的控件提前销毁，
+        关闭详情页时容易连带崩溃。
+        """
         device = next((d for d in self._all_devices if d.did == did), None)
         if device is None:
             return
         custom = name_override_store.get(did)
         device.name = custom or device.cloud_name or device.name
-        self._rebuild_grid()
+        card = self._cards.get(did)
+        if card is not None:
+            card.set_display_name(device.name)
+        # 托盘与挂件是独立窗口，重建它们不涉及当前点击事件的控件
         self._update_tray_devices()
         self._update_board_devices()
         if self._all_devices:

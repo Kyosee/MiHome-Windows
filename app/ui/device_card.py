@@ -118,7 +118,13 @@ class DeviceCard(SiRowCard):
         # 不会立刻收到 resizeEvent，先截好避免长名字露出完整内容
         self._update_elided_name()
 
-    # ---------- 名称省略 ----------
+    # ---------- 名称显示 ----------
+
+    def set_display_name(self, name: str) -> None:
+        """只更新卡片上的设备名，不触发整卡重建。"""
+        self.device.name = name
+        self._name_label.setToolTip(name)
+        self._update_elided_name()
 
     @staticmethod
     def _elide_two_lines(text: str, width: int, metrics) -> str:
@@ -240,9 +246,12 @@ class DeviceCard(SiRowCard):
     # ---------- 交互 ----------
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt 命名约定)
+        # 先交给基类处理再发信号：open_requested 会同步打开模态详情页，
+        # 期间用户可能改名触发网格重建，本卡片被销毁；把信号放最后，
+        # 就不会在对象已删除后继续访问它
+        super().mouseReleaseEvent(event)
         # 电源钮自己消费点击事件，能走到这里的都是卡片空白区
         if event.button() == Qt.LeftButton:
             self.open_requested.emit(self.device.did)
-        super().mouseReleaseEvent(event)
 
 
