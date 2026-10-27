@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE = 20
 # 虚拟子设备的 did 后缀：<父did>.sN，N 为该路对应的 siid
 _SUB_DEVICE_SUFFIX = re.compile(r"\.s(\d+)$")
+
+# 云端对「规格里有、设备实际不支持」的属性返回的错误码。这类响应属于
+# 规格与实际能力不符，按调试信息记录即可，不必当成读取故障
+_UNSUPPORTED_PROP_CODES = {-704002000}
 # spec 并发拉取线程数；目标是 miot-spec.org 的独立请求，无会话竞争
 _SPEC_WORKERS = 8
 
@@ -518,7 +522,10 @@ class MijiaService:
             queries.append({"did": target, **method})
             owners.append(did)
 
-        failed: list[str] = []
+        # 记录失败项及其原始响应：响应为空通常意味着 spec 声称有该属性、
+        # 云端实际不认（路由器这类），按调试信息记即可；有明确错误码的
+        # 才是真正需要关注的读取失败
+        failed: list[tuple[str, dict | None]] = []
         for start in range(0, len(queries), _BATCH_SIZE):
             batch = queries[start:start + _BATCH_SIZE]
             batch_owners = owners[start:start + _BATCH_SIZE]
@@ -542,13 +549,19 @@ class MijiaService:
                     # "确认没有开关能力"，一旦落进记忆，这台设备就再也不会
                     # 被轮询（force=True 会跳过 None），按钮永久消失。
                     # 这里只把它列进待兜底清单，兜底仍失败就不写进结果。
-                    failed.append(owner)
+                    failed.append((owner, item))
 
         # 读不到的逐台留一次线索（不按轮询刷屏）
-        for did in failed:
+        for did, item in failed:
             if result.get(did) is None:
+                # 规格声明了但设备实际不支持的属性不算故障，按调试级别记：
+                # 响应缺 code、或返回「属性不存在」这类明确表示不支持的错误码。
+                # 其余错误码（离线、鉴权、限流）才值得按警告记。
+                code = item.get("code") if isinstance(item, dict) else None
+                unsupported = code in (None, 0) or code in _UNSUPPORTED_PROP_CODES
+                level = logging.DEBUG if unsupported else logging.WARNING
                 self._log_switch_failure(
-                    did, method_of.get(did), None, "读取失败")
+                    did, method_of.get(did), item, "读取失败", level=level)
         return result
 
     # ---------- 虚拟子设备的请求目标 ----------
