@@ -39,7 +39,7 @@ from app.siui.components.button import SiToggleButtonRefactor
 import qtawesome as qta
 
 from app.core import cache as device_cache
-from app.core import icon_store, name_override_store, schedule_store
+from app.core import icon_store, name_override_store, schedule_store, settings_store
 from app.core.jobs import PRIORITY_CONTROL, PRIORITY_IDLE, JobExecutor
 from app.core.models import DeviceInfo, SceneInfo, is_speaker
 from app.core.scheduler import Scheduler
@@ -47,6 +47,7 @@ from app.core.service import MijiaService
 from app.ui.board_manager import BoardManagerDialog
 from app.ui.device_card import DeviceCard
 from app.ui.device_dialog import DeviceDetailDialog
+from app.ui.prop_widgets import FlowLayout
 from app.ui.scene_card import SceneCard
 from app.ui.schedule_dialog import ScheduleDialog
 from app.ui import si_theme
@@ -195,6 +196,8 @@ class MainWindow(QMainWindow):
         self._homes: list[str] = []
         self._current_home: str = ""
         self._current_room = _ALL_ROOMS
+        # 是否已经按设置里的默认标签初始化过房间选择
+        self._room_initialized = False
         self._settings_dialog: SettingsDialog | None = None
         # did -> 开关状态记忆；None 表示确认无开关能力。
         # 探测结论是设备的固有属性，跨家庭/房间/刷新复用；
@@ -366,10 +369,19 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(btn_wrapper)
         content.addLayout(top_bar)
 
-        # ---- 房间 tab 行 ----
+        # ---- 房间 tab 行：标签流式排列，放不下自动换行 ----
         self._tab_row = QHBoxLayout()
-        self._tab_row.setSpacing(14)
+        self._tab_row.setSpacing(10)
+        # 右侧多留一截：排序按钮要与顶栏那组图标按钮的右边缘对齐
+        self._tab_row.setContentsMargins(0, 0, 25, 0)
         self._tab_buttons: dict[str, SiToggleButtonRefactor] = {}
+        # 标签数量与宽度都不固定，用流式布局让它们像设备卡片一样自动换行；
+        # 排序按钮单独固定在右侧，不参与换行
+        self._tab_flow = FlowLayout(margin=0, spacing=14)
+        self._tab_row.addLayout(self._tab_flow, stretch=1)
+        self._sort_btn = self._make_tab_sort_button()
+        self._tab_row.addWidget(
+            self._sort_btn, alignment=Qt.AlignmentFlag.AlignTop)
         content.addLayout(self._tab_row)
 
         # ---- 环境状态胶囊：房间栏下方一行，点击看明细 ----
@@ -946,7 +958,13 @@ class MainWindow(QMainWindow):
         self._homes = [_ALL_HOMES] + homes
         if self._current_home not in self._homes:
             self._current_home = self._homes[0] if self._homes else _ALL_HOMES
-        self._current_room = _ALL_ROOMS
+        # 默认标签只在首次加载时应用：之后刷新设备要保持用户当前看的
+        # 房间，否则点一次刷新就被拽回默认页；房间消失时退回全屋
+        if not self._room_initialized:
+            self._current_room = self._preferred_room()
+            self._room_initialized = True
+        elif self._current_room not in self._natural_tabs():
+            self._current_room = _ALL_ROOMS
         self._home_btn.setText(f"{self._current_home} ▾")
         self._rebuild_tabs()
         self._rebuild_grid()
@@ -1858,27 +1876,92 @@ class MainWindow(QMainWindow):
     # ---------- 房间 tab ----------
 
     def _rebuild_tabs(self) -> None:
-        # 彻底清空布局条目（含 stretch）：只删按钮会残留 stretch 项，
-        # 每次切换家庭都会把新按钮往右推一格
-        while self._tab_row.count():
-            item = self._tab_row.takeAt(0)
+        # 只清标签，保留右侧的排序按钮（它不属于标签集合）
+        while self._tab_flow.count():
+            item = self._tab_flow.takeAt(0)
             if widget := item.widget():
+                # deleteLater 是延迟删除，旧按钮会和新按钮同帧显示；
+                # 先隐藏掉，重建过程中不会出现重影
+                widget.hide()
                 widget.deleteLater()
         self._tab_buttons.clear()
 
-        rooms = ([_SCENE_TAB] if self._show_scene_tab else []) + [_ALL_ROOMS] + sorted({
+        for room in self._ordered_tabs(self._natural_tabs()):
+            btn = themed_tab_button(room)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, r=room: self._select_room(r))
+            self._tab_flow.addWidget(btn)
+            self._tab_buttons[room] = btn
+        self._sync_tab_style()
+
+    def _preferred_room(self) -> str:
+        """启动后打开的标签：设置里指定的优先，已不存在时退回全屋。"""
+        saved = settings_store.get_default_tab()
+        if saved and saved in self._natural_tabs():
+            return saved
+        return _ALL_ROOMS
+
+    def _natural_tabs(self) -> list[str]:
+        """标签的自然顺序：场景、全屋，其余房间按名称排列。
+
+        这是「没有自定义顺序」时的默认排法，恢复默认与新增标签兜底
+        都以它为准。
+        """
+        return ([_SCENE_TAB] if self._show_scene_tab else []) + [_ALL_ROOMS] + sorted({
             d.room_name for d in self._all_devices
             if (self._current_home == _ALL_HOMES or d.home_name == self._current_home)
             and d.room_name and d.room_name != "未知"
         })
-        for room in rooms:
-            btn = themed_tab_button(room)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(lambda _, r=room: self._select_room(r))
-            self._tab_row.addWidget(btn)
-            self._tab_buttons[room] = btn
-        self._tab_row.addStretch(1)
-        self._sync_tab_style()
+
+    @staticmethod
+    def _ordered_tabs(tabs: list[str]) -> list[str]:
+        """按保存的顺序排标签，新出现的追加到末尾。
+
+        保存的顺序只记名字；换家庭后房间集合会变，没出现在记录里的
+        标签保持默认顺序接在后面，不会因为排序丢失入口。
+        """
+        saved = settings_store.get_room_order()
+        if not saved:
+            return list(tabs)
+        index = {name: pos for pos, name in enumerate(saved)}
+        known = sorted((t for t in tabs if t in index), key=lambda t: index[t])
+        rest = [t for t in tabs if t not in index]
+        return known + rest
+
+    def _make_tab_sort_button(self) -> QPushButton:
+        """标签行最右端的排序入口。"""
+        btn = QPushButton()
+        btn.setFixedSize(28, 28)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("调整标签顺序")
+        btn.setIconSize(QSize(18, 18))
+        btn.setIcon(qta.icon("mdi.sort-variant", color=SiColors.TEXT_SECONDARY))
+        btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " border-radius: 8px; }"
+            f"QPushButton:hover {{ background: {SiColors.BTN_HOVER}; }}")
+        btn.clicked.connect(self._open_room_order)
+        return btn
+
+    def _open_room_order(self) -> None:
+        """打开标签排序对话框，确定后立即重建标签行。"""
+        from app.ui.room_order_dialog import RoomOrderDialog
+
+        current = list(self._tab_buttons.keys())
+        defaults = self._natural_tabs()
+        dlg = RoomOrderDialog(current, defaults, self)
+        accepted = dlg.exec() == RoomOrderDialog.DialogCode.Accepted
+        order = dlg.result_order()
+        restored = dlg.restored_default()
+        default_tab = dlg.default_tab()
+        dlg.deleteLater()
+        if not accepted:
+            return
+        # 恢复默认时写空表，让新出现的房间继续按自然顺序排在后面；
+        # 若把当时的顺序固化下来，以后新增房间就不会自动归位
+        settings_store.set_room_order([] if restored else order)
+        settings_store.set_default_tab(default_tab)
+        self._rebuild_tabs()
 
     def _select_room(self, room: str) -> None:
         self._current_room = room

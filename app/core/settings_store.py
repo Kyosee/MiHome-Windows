@@ -34,6 +34,10 @@ _DEFAULTS: dict = {
     "ui_scale": 1.0,    # 界面缩放个人微调乘数（叠加在软件基准缩放之上），需重启生效
     "tray_columns": 2,  # 托盘快捷窗口卡片列数：1 或 2
     "check_update_enabled": True,  # 启动时自动检查 GitHub 新版本
+    # 房间标签的自定义顺序（房间名列表）；未列出的房间按名称排在后面
+    "room_order": [],
+    # 启动后默认打开的标签名；空串表示「全屋」
+    "default_tab": "",
 }
 
 
@@ -49,6 +53,18 @@ def _read_raw() -> dict:
 
 def _write_raw(raw: dict) -> None:
     _json_store.write_json(_json_store.data_file(_FILENAME), raw)
+
+
+def get_default_tab() -> str:
+    """启动后默认打开的标签名；空串表示「全屋」。"""
+    value = _read_raw().get("default_tab")
+    return value if isinstance(value, str) else ""
+
+
+def set_default_tab(name: str) -> None:
+    raw = _read_raw()
+    raw["default_tab"] = str(name or "")
+    _write_raw(raw)
 
 
 def get_minimize_to_tray() -> bool:
@@ -123,6 +139,20 @@ def get_hide_no_func_devices() -> bool:
 def set_hide_no_func_devices(value: bool) -> None:
     raw = _read_raw()
     raw["hide_no_func_devices"] = bool(value)
+    _write_raw(raw)
+
+
+def get_room_order() -> list[str]:
+    """房间标签的自定义顺序；空列表表示按名称排序。"""
+    raw = _read_raw().get("room_order")
+    if not isinstance(raw, list):
+        return []
+    return [str(name) for name in raw if isinstance(name, str) and name]
+
+
+def set_room_order(rooms: list[str]) -> None:
+    raw = _read_raw()
+    raw["room_order"] = [str(name) for name in rooms]
     _write_raw(raw)
 
 
