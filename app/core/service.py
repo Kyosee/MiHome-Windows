@@ -32,7 +32,7 @@ from mijiaAPI import (
 from mijiaAPI.devices import DevAction, DevProp
 from mijiaAPI.miutils import generate_enc_params, gen_nonce, get_signed_nonce
 
-from . import icon_store, spec_zh
+from . import icon_store, name_store, spec_zh
 from .models import ActionInfo, DeviceDetail, DeviceInfo, PropInfo, SceneInfo
 from .net_guard import install_default_timeout
 
@@ -56,6 +56,36 @@ class ServiceError(Exception):
     """携带用户可直接阅读的中文信息，界面层直接展示 message 即可。"""
 
 
+def _normalize_api_locale(api) -> None:
+    """把系统 locale 规范成上游认识的语言标记。
+
+    Windows 的 locale.getlocale() 返回 "Chinese (Simplified)_China"
+    这类显示名，上游只校验是否含下划线就拼进 User-Agent，服务端
+    认不出语言，设备列表的 name 会退回英文商品名。这里统一映射成
+    标准的 zh_CN / en_US，并清掉按旧值缓存的 UA 让它重建。
+    """
+    raw = str(getattr(api, "locale", "") or "").strip()
+    lowered = raw.lower()
+    if "chinese" in lowered or lowered.startswith("zh"):
+        # 繁体系统要保留 zh_TW，不能一律当简体
+        if ("traditional" in lowered or "taiwan" in lowered
+                or lowered.endswith("_tw") or lowered.endswith("_hk")):
+            normalized = "zh_TW"
+        else:
+            normalized = "zh_CN"
+    elif "english" in lowered or lowered.startswith("en"):
+        normalized = "en_US"
+    else:
+        normalized = "zh_CN"
+    api.locale = normalized
+    # 不比较新旧值：历史会话可能把错误语言拼进 UA 并留在认证文件里，
+    # 每次启动都重建一次请求头，才能保证服务端拿到正确语言
+    try:
+        api.auth_data.pop("ua", None)
+    except Exception:
+        pass
+
+
 def _wrap_error(exc: Exception, context: str) -> ServiceError:
     # 上游异常的 args 结构各不相同，原样拼接足够定位问题又不至于暴露噪音；
     # 调用方统一用 raise ... from exc 保持原始堆栈链
@@ -74,9 +104,9 @@ class MijiaService:
         self._device_index: dict[str, tuple[str, str, str]] = {}
         # spec_type -> spec 内存缓存，轮询命中后不再读文件/打网络
         self._spec_cache: dict[str, dict | None] = {}
-        # spec 产品名缓存就绪后的产品页中文名缓存：
-        # model -> 中文名或 None（已确认无中文名，不再重查）
-        self._product_page_names: dict[str, str | None] = {}
+        # 产品页中文名缓存：model -> 中文名或 None（已确认无中文名，不再重查）。
+        # 成功解析的名字从磁盘恢复，跨会话复用；失败项只在本会话记忆
+        self._product_page_names: dict[str, str | None] = dict(name_store.load())
         # model -> 图标 URL 或 None（拉取失败，会话内不再重试）；
         # 启动即从磁盘加载，此后只增不删（见 icon_store）
         self._icon_cache: dict[str, str | None] = icon_store.load_urls()
@@ -91,7 +121,9 @@ class MijiaService:
         之前，用户只会看到进程无声退出。
         """
         try:
-            return mijiaAPI()
+            api = mijiaAPI()
+            _normalize_api_locale(api)
+            return api
         except (json.JSONDecodeError, KeyError, TypeError, OSError) as exc:
             auth_path = Path.home() / ".config" / "mijia-api" / "auth.json"
             try:
@@ -100,7 +132,9 @@ class MijiaService:
                 pass
             logger.warning("认证文件损坏已隔离为 auth.json.corrupt，请重新扫码登录: %s", exc)
             # 文件已移除，上游按「无认证文件」处理，available 恒为 False
-            return mijiaAPI()
+            api = mijiaAPI()
+            _normalize_api_locale(api)
+            return api
 
     @staticmethod
     def api_version() -> str:
@@ -931,7 +965,9 @@ class MijiaService:
 
         name = None
         try:
-            r = requests.get(f"https://home.miot-spec.com/p/{model}", timeout=10,
+            # 产品页服务已基本不可用（普遍超时或 404），超时压短避免
+            # 每型号白等十秒；失败会按"无中文名"记忆，不再重试
+            r = requests.get(f"https://home.miot-spec.com/p/{model}", timeout=3,
                              headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code == 200:
                 m = re.search(
@@ -945,6 +981,9 @@ class MijiaService:
         except Exception as exc:
             logger.warning("产品页名称查询失败 %s: %s", model, exc)
         self._product_page_names[model] = name
+        if name:
+            # 只把成功结果落盘：失败留给下次启动重试
+            name_store.save({m: n for m, n in self._product_page_names.items() if n})
         return name
 
     def spec_has_published_functions(self, spec_type: str) -> bool | None:
@@ -963,7 +1002,7 @@ class MijiaService:
         return bool(spec and spec.get("properties"))
 
     def localized_product_names(self, dids: list[str], names: dict[str, str]) -> dict[str, str]:
-        """did -> spec 中文产品名，用于替换未改名的英文默认设备名。
+        """did -> 中文产品名，用于替换未改名的英文默认设备名。
 
         米家 APP 对未改名设备显示的是产品库本地化商品名，而第三方
         设备列表接口的 name 字段只有英文默认名（国际版产品尤甚）。

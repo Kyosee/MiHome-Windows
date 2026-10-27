@@ -955,6 +955,9 @@ class MainWindow(QMainWindow):
         self._update_voice_fab()
         self._update_tray_devices()
         self._update_board_devices()
+        # 本地化必须在列表落地后立即跑一次：只在开关轮询回调里触发的话，
+        # 无开关设备（手环、牙刷）可能永远等不到，界面就一直是英文名
+        self._maybe_localize_names()
         self._load_card_icons()
         # 场景入口开启时启动即预取场景列表，进场景页无需等待
         if self._show_scene_tab:
