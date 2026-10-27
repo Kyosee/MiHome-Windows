@@ -1030,10 +1030,20 @@ class MainWindow(QMainWindow):
         if not self._all_devices:
             return
         try:
-            names_now = {d.did: d.name for d in self._all_devices}
+            # 有自定义名的设备不参与本地化：用户改的名字优先级最高，
+            # 否则英文自定义名会被规格里的中文名替换掉，主页与详情页
+            # 显示的名字就会不一致
+            overrides = name_override_store.load_all()
+            ascii_devices = [d for d in self._all_devices
+                             if d.name.isascii() and d.model
+                             and d.did not in overrides]
+            # 这个方法挂在开关轮询回调上，几秒一次；没有需要本地化的
+            # 设备就立刻返回，别做无谓的字典构建与规格遍历
+            if not ascii_devices:
+                return
+            names_now = {d.did: d.name for d in ascii_devices}
             replacements = self._service.localized_product_names(
                 list(names_now), names_now)
-            ascii_devices = [d for d in self._all_devices if d.name.isascii() and d.model]
             model_to_did = {d.model: d.did for d in ascii_devices}
             models = sorted(model_to_did)
             if models:
@@ -1044,7 +1054,7 @@ class MainWindow(QMainWindow):
             logger.exception("本地化设备名失败")
             return
         if replacements:
-            if self._apply_display_names(replacements):
+            if self._apply_display_names(replacements, overrides):
                 return  # 已重建并同步托盘
         # 仍有未解析的型号 → 提交一次后台查询（防重入）
         # 走 _web_jobs：产品页单次实测 2.4 秒、超时 30 秒，绝不能在
@@ -1062,10 +1072,18 @@ class MainWindow(QMainWindow):
                 priority=PRIORITY_IDLE,
             )
 
-    def _apply_display_names(self, replacements: dict[str, str]) -> bool:
-        """把替换名写入设备对象并重建展示；返回是否有实际变化。"""
+    def _apply_display_names(self, replacements: dict[str, str],
+                             overrides: dict[str, str]) -> bool:
+        """把替换名写入设备对象并重建展示；返回是否有实际变化。
+
+        这里再挡一次有自定义名的设备：用户改的名字优先级最高，
+        即使调用方漏过滤，也不能被规格里的中文名覆盖。
+        overrides 由调用方传入，省掉一次重复读取。
+        """
         changed = False
         for d in self._all_devices:
+            if d.did in overrides:
+                continue
             new_name = replacements.get(d.did)
             if new_name and new_name != d.name:
                 d.name = new_name
@@ -1096,7 +1114,12 @@ class MainWindow(QMainWindow):
 
     def _update_tray_devices(self) -> None:
         if self._tray is not None:
-            self._tray.set_devices(self._displayed_devices(), self._known_power)
+            try:
+                self._tray.set_devices(
+                    self._displayed_devices(), self._known_power)
+            except Exception:
+                # 托盘窗口可能在关闭动画里，同步失败不影响主界面
+                logger.warning("同步托盘设备失败", exc_info=True)
 
     def _update_board_devices(self) -> None:
         """设备列表 / 开关状态变化后同步桌面挂件。
@@ -1734,7 +1757,8 @@ class MainWindow(QMainWindow):
         custom = name_override_store.get(did)
         device.name = custom or device.cloud_name or device.name
         card = self._cards.get(did)
-        if card is not None:
+        # 卡片可能已随网格重建被销毁，先确认底层对象还在
+        if card is not None and shiboken6.isValid(card):
             card.set_display_name(device.name)
         # 托盘与挂件是独立窗口，重建它们不涉及当前点击事件的控件
         self._update_tray_devices()
@@ -2211,8 +2235,10 @@ class MainWindow(QMainWindow):
         dialog.panel.name_changed.connect(self._on_device_name_changed)
         dialog.load()
         dialog.exec()
-        dialog.panel.name_changed.disconnect(self._on_device_name_changed)
-        dialog.panel.metrics_updated.disconnect(self._on_detail_metrics)
+        # 面板可能随关闭流程提前释放，断开信号前先确认对象还在
+        if shiboken6.isValid(dialog.panel):
+            dialog.panel.name_changed.disconnect(self._on_device_name_changed)
+            dialog.panel.metrics_updated.disconnect(self._on_detail_metrics)
         dialog.deleteLater()
         # 详情期间可能在面板里改过开关，关闭后读一次回填卡片；
         # 无开关能力的设备返回 None 直接跳过
